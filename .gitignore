@@ -1,2 +1,4 @@
 .pi-sessions/
 .pix/
+# local credential references (op:// pointers, not secrets, but not shared)
+*.local.env
