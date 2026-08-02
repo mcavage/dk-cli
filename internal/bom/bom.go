@@ -13,16 +13,34 @@ import (
 	"io"
 	"os"
 	"sort"
-	"strconv"
+
 	"strings"
 )
 
 // Line is one part to buy.
+//
+// Qty is the number to ORDER, which is frequently not the number the build
+// needs. A document with separate "Qty" and "On hand" and "Buy" columns means
+// buying the Qty column orders parts the user already owns.
 type Line struct {
 	MPN          string   `json:"mpn"`
 	Manufacturer string   `json:"manufacturer,omitempty"`
 	Qty          int      `json:"qty"`
 	RefDes       []string `json:"refdes,omitempty"`
+
+	// Need is what the build consumes, OnHand what the user already has, when
+	// the document distinguishes them. Both are -1 when not stated.
+	Need   int `json:"need,omitempty"`
+	OnHand int `json:"on_hand,omitempty"`
+
+	// Qualifier records whether the ordered quantity was exact in the source or
+	// a hedge like "8+" or "1-2" that a human should confirm.
+	Qualifier Qualifier `json:"qty_qualifier,omitempty"`
+	RawQty    string    `json:"raw_qty,omitempty"`
+
+	// QtyColumn names where Qty came from, so a report can prove it read the
+	// right column.
+	QtyColumn string `json:"qty_column,omitempty"`
 
 	// SourceRows are the 1-based input rows this line came from. More than one
 	// means duplicates were merged.
@@ -72,8 +90,12 @@ var (
 		"mfr part number", "mfr. part #", "mfg part number", "part number",
 		"partnumber", "part", "dk_pn", "digikey part number", "digikeypartnumber",
 	}
-	qtyAliases = []string{"qty", "quantity", "qnty", "count"}
-	refAliases = []string{
+	qtyAliases = []string{"qty", "quantity", "qnty", "count", "need", "needed", "total"}
+	// buyAliases is checked BEFORE qty when deciding what to order. In a build
+	// document, "Qty" is what the design consumes and "Buy" is what is missing.
+	buyAliases    = []string{"buy", "to buy", "order", "order qty", "purchase", "shortfall"}
+	onHandAliases = []string{"on hand", "onhand", "on-hand", "have", "in stock", "owned"}
+	refAliases    = []string{
 		"refdes", "reference", "references", "designator", "designators",
 		"ref", "refs",
 	}
@@ -107,15 +129,32 @@ func ParseFile(path string, opts Options) (*BOM, error) {
 	return b, err
 }
 
-// Parse reads a BOM from a reader.
+// Parse reads a BOM from a reader, autodetecting CSV or a markdown table.
 func Parse(r io.Reader, opts Options) (*BOM, error) {
-	cr := csv.NewReader(r)
-	cr.FieldsPerRecord = -1 // ragged rows are common in exported BOMs
-	cr.TrimLeadingSpace = true
-
-	rows, err := cr.ReadAll()
+	blob, err := io.ReadAll(r)
 	if err != nil {
-		return nil, fmt.Errorf("bom: reading csv: %w", err)
+		return nil, fmt.Errorf("bom: reading input: %w", err)
+	}
+
+	var rows [][]string
+	if looksLikeMarkdown(string(blob)) {
+		tables, err := extractTables(strings.NewReader(string(blob)))
+		if err != nil {
+			return nil, fmt.Errorf("bom: reading markdown: %w", err)
+		}
+		t, ok := pickPartsTable(tables, opts.ColumnMap)
+		if !ok {
+			return nil, fmt.Errorf("%w: found %d markdown tables but none has a "+
+				"recognizable part column; use --columns mpn=<header>", ErrNoMPNCol, len(tables))
+		}
+		rows = append([][]string{t.header}, t.rows...)
+	} else {
+		cr := csv.NewReader(strings.NewReader(string(blob)))
+		cr.FieldsPerRecord = -1 // ragged rows are common in exported BOMs
+		cr.TrimLeadingSpace = true
+		if rows, err = cr.ReadAll(); err != nil {
+			return nil, fmt.Errorf("bom: reading csv: %w", err)
+		}
 	}
 	rows = dropBlankRows(rows)
 	if len(rows) == 0 {
@@ -135,7 +174,29 @@ func Parse(r io.Reader, opts Options) (*BOM, error) {
 	if defaultQty <= 0 {
 		defaultQty = 1
 	}
-	if idx.qty < 0 {
+
+	// Decide ONCE which column funds the order, and say so.
+	//
+	// This is the difference between ordering 8 diodes and ordering 22 when 14
+	// are already in a drawer. A document with a "Buy" column has already done
+	// the subtraction; reading "Qty" instead silently multiplies the bill.
+	qtyCol, qtyColName := idx.qty, "qty"
+	switch {
+	case idx.buy >= 0:
+		qtyCol, qtyColName = idx.buy, header(rows[0], idx.buy)
+		if idx.qty >= 0 {
+			b.Notes = append(b.Notes, fmt.Sprintf(
+				"ordering from the %q column, not %q: %q is what the build needs, "+
+					"%q is what is missing",
+				qtyColName, header(rows[0], idx.qty), header(rows[0], idx.qty), qtyColName))
+		}
+	case idx.qty >= 0 && idx.onhand >= 0:
+		qtyColName = header(rows[0], idx.qty) + " minus " + header(rows[0], idx.onhand)
+		b.Notes = append(b.Notes, fmt.Sprintf(
+			"no buy column; ordering %s", qtyColName))
+	case idx.qty >= 0:
+		qtyColName = header(rows[0], idx.qty)
+	default:
 		b.Notes = append(b.Notes,
 			fmt.Sprintf("no quantity column found, assuming %d per row", defaultQty))
 	}
@@ -165,20 +226,60 @@ func Parse(r io.Reader, opts Options) (*BOM, error) {
 		}
 
 		qty := defaultQty
+		qual := QtyExact
+		rawQty := ""
+		need, onHand := -1, -1
+
 		if idx.qty >= 0 {
-			raw := strings.TrimSpace(get(row, idx.qty))
-			if raw != "" {
-				n, err := parseQty(raw)
-				if err != nil {
-					return nil, fmt.Errorf("bom: row %d (%s): %w", rowNum, mpn, err)
-				}
-				qty = n
+			if q, err := ParseQuantity(get(row, idx.qty)); err == nil && q.Qualifier != QtyNone {
+				need = q.Value
 			}
 		}
-		if qty == 0 {
+		if idx.onhand >= 0 {
+			if q, err := ParseQuantity(get(row, idx.onhand)); err == nil {
+				onHand = q.Value
+			}
+		}
+
+		if qtyCol >= 0 {
+			rawQty = strings.TrimSpace(get(row, qtyCol))
+			q, err := ParseQuantity(rawQty)
+			if err != nil {
+				return nil, fmt.Errorf("bom: row %d (%s): column %q: %w",
+					rowNum, mpn, qtyColName, err)
+			}
+			qty, qual = q.Value, q.Qualifier
+
+			// "Qty minus On hand" only applies when the document did not already
+			// give us a buy column.
+			if idx.buy < 0 && need >= 0 && onHand >= 0 {
+				qty = need - onHand
+				if qty < 0 {
+					qty = 0
+				}
+			}
+		}
+
+		if qual == QtyNone || qty == 0 {
+			reason := "nothing to buy for this row"
+			switch {
+			case onHand >= 0 && need >= 0 && onHand >= need:
+				reason = fmt.Sprintf("already on hand (%d of %d)", onHand, need)
+			case rawQty == "0":
+				reason = "quantity is zero"
+			case rawQty != "":
+				reason = fmt.Sprintf("quantity %q means nothing to buy", rawQty)
+			}
+			b.Skips = append(b.Skips, Skip{
+				Row: rowNum, RefDes: refdes, Value: value, Reason: reason,
+			})
+			continue
+		}
+		if qual == QtyUncountable {
 			b.Skips = append(b.Skips, Skip{
 				Row: rowNum, RefDes: refdes, Value: value,
-				Reason: "quantity is zero",
+				Reason: fmt.Sprintf("quantity %q is a bundle, not a part count; "+
+					"pick a specific product and give it a number", rawQty),
 			})
 			continue
 		}
@@ -189,6 +290,11 @@ func Parse(r io.Reader, opts Options) (*BOM, error) {
 			existing.Qty += qty
 			existing.RefDes = append(existing.RefDes, splitRefDes(refdes)...)
 			existing.SourceRows = append(existing.SourceRows, rowNum)
+			// The least precise qualifier wins a merge: mixing an exact 4 with an
+			// approximate 6 does not produce an exact 10.
+			if qual.NeedsReview() {
+				existing.Qualifier = qual
+			}
 			continue
 		}
 		byKey[key] = &Line{
@@ -197,6 +303,11 @@ func Parse(r io.Reader, opts Options) (*BOM, error) {
 			Qty:          qty,
 			RefDes:       splitRefDes(refdes),
 			SourceRows:   []int{rowNum},
+			Need:         need,
+			OnHand:       onHand,
+			Qualifier:    qual,
+			RawQty:       rawQty,
+			QtyColumn:    qtyColName,
 		}
 		order = append(order, key)
 	}
@@ -220,11 +331,11 @@ func Parse(r io.Reader, opts Options) (*BOM, error) {
 }
 
 type colIndex struct {
-	mpn, qty, refdes, mfr, dnp, value int
+	mpn, qty, refdes, mfr, dnp, value, buy, onhand int
 }
 
 func mapColumns(header []string, override map[string]string) (colIndex, error) {
-	idx := colIndex{mpn: -1, qty: -1, refdes: -1, mfr: -1, dnp: -1, value: -1}
+	idx := colIndex{mpn: -1, qty: -1, refdes: -1, mfr: -1, dnp: -1, value: -1, buy: -1, onhand: -1}
 
 	norm := make([]string, len(header))
 	for i, h := range header {
@@ -257,6 +368,8 @@ func mapColumns(header []string, override map[string]string) (colIndex, error) {
 	idx.mfr = find(mfrAliases)
 	idx.dnp = find(dnpAliases)
 	idx.value = find(valAliases)
+	idx.buy = find(buyAliases)
+	idx.onhand = find(onHandAliases)
 
 	// Explicit overrides win, and a name that is not in the file is an error
 	// rather than a silent fallback to guessing.
@@ -286,9 +399,13 @@ func mapColumns(header []string, override map[string]string) (colIndex, error) {
 			idx.dnp = pos
 		case "value":
 			idx.value = pos
+		case "buy":
+			idx.buy = pos
+		case "onhand", "on_hand":
+			idx.onhand = pos
 		default:
 			return idx, fmt.Errorf("bom: --columns: unknown field %q "+
-				"(want mpn, qty, refdes, manufacturer, dnp or value)", field)
+				"(want mpn, qty, buy, onhand, refdes, manufacturer, dnp or value)", field)
 		}
 	}
 
@@ -302,6 +419,11 @@ func mapColumns(header []string, override map[string]string) (colIndex, error) {
 	}
 	if idx.value == idx.mpn {
 		idx.value = -1
+	}
+	for _, p := range []*int{&idx.qty, &idx.buy, &idx.onhand} {
+		if *p == idx.mpn {
+			*p = -1
+		}
 	}
 	return idx, nil
 }
@@ -324,24 +446,12 @@ func shouldSkip(row []string, idx colIndex) (string, bool) {
 	return "", false
 }
 
-func parseQty(s string) (int, error) {
-	clean := strings.ReplaceAll(strings.TrimSpace(s), ",", "")
-	n, err := strconv.Atoi(clean)
-	if err != nil {
-		// Some templates write "3.0". Accept an exact whole float, refuse a
-		// fractional quantity rather than rounding a part count.
-		if f, ferr := strconv.ParseFloat(clean, 64); ferr == nil {
-			if f == float64(int(f)) {
-				return int(f), nil
-			}
-			return 0, fmt.Errorf("fractional quantity %q", s)
-		}
-		return 0, fmt.Errorf("quantity %q is not a number", s)
+// header returns a header cell for use in messages.
+func header(row []string, i int) string {
+	if i < 0 || i >= len(row) {
+		return ""
 	}
-	if n < 0 {
-		return 0, fmt.Errorf("negative quantity %q", s)
-	}
-	return n, nil
+	return strings.TrimSpace(row[i])
 }
 
 // splitRefDes handles KiCad's grouped references, e.g. "R1,R2,R3" or "R1 R2".
