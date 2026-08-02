@@ -20,10 +20,16 @@ Status: plan only, no code written.
 ## 1. Why DigiKey, not Mouser
 
 The original plan targeted Mouser. Comparing the two APIs directly reversed the decision.
-DigiKey wins on: a real sandbox environment (Mouser has none), proper HTTP status codes and
-RFC-7807 problem details (Mouser returns HTTP 200 with a populated `Errors[]`), rate limit
-headers on every response (Mouser publishes numbers and tells you nothing), parametric search
-(Mouser has none at all), typed fields instead of strings to parse, and a substitutes endpoint.
+DigiKey wins on: proper HTTP status codes and RFC-7807 problem details (Mouser returns HTTP 200
+with a populated `Errors[]`), rate limit headers on every response (Mouser publishes numbers and
+tells you nothing), parametric search (Mouser has none at all), typed fields instead of strings
+to parse, a substitutes endpoint, and server-side field projection.
+
+**Correction to the original comparison:** "DigiKey has a real sandbox" was listed as a headline
+advantage. It is largely false. DigiKey's sandbox always returns a canned example product and
+exists only to verify auth plumbing (their FAQ says so outright), so it cannot test any of the
+packaging, MOQ, pricing, or stock behavior this tool depends on. The remaining advantages stand
+and the decision does not change, but this one should not have been counted.
 
 Mouser's one structural advantage was a persistent server-side cart. That turned out not to
 matter, because DigiKey has two zero-auth handoff paths that deliver the actual goal more
@@ -79,11 +85,38 @@ with two implementations, and by `dk doctor` probing it.
 ### Product Information v4 (the authed part)
 `POST api.digikey.com/products/v4/ProductSearch/KeywordSearch` plus ProductDetails,
 ProductPricing, ProductSubstitutes, ProductAssociations, Categories, Manufacturers.
-- Auth is **OAuth2 2-legged client credentials**: client ID and secret to the token endpoint,
-  then `Authorization: Bearer` plus an `X-DIGIKEY-Client-Id` header. Tokens are short-lived
-  (~30 min) and must be cached. No browser redirect, no refresh token, no 3-legged flow.
+- Auth is **OAuth2 2-legged client credentials**. `POST https://api.digikey.com/v1/oauth2/token`
+  with `client_id`, `client_secret`, `grant_type=client_credentials` as
+  `application/x-www-form-urlencoded`. Response carries `access_token`, `expires_in`,
+  `token_type`. Then every call sends `Authorization: Bearer <token>` **plus** an
+  `X-DIGIKEY-Client-Id` header (both are required; the Bearer prefix is mandatory or you get a
+  bearer token error). No browser redirect, no refresh token, no 3-legged flow.
+- **Access tokens expire in 10 minutes** (documented; the example response shows
+  `expires_in: 599`). This is much shorter than typical and it drives D15: with an agent invoking
+  the binary dozens of times across a session, most invocations will hit a valid cached token but
+  refreshes will be frequent, and concurrent invocations must not stampede the token endpoint.
+- Sandbox is the same flow against host `sandbox-api.digikey.com`, with its own separately
+  registered application and its own credentials.
+- An application must be **subscribed to an API Product** (Product Information V4) before calls
+  succeed. Registration alone is not enough.
 - Locale is set by headers: `X-DIGIKEY-Locale-Site`, `-Language`, `-Currency`.
-- **Sandbox environment exists** and mirrors the response structure.
+- **The sandbox is auth-only.** It always returns the same canned example product regardless of
+  the query; its documented purpose is verifying that a client can authenticate and communicate.
+  It cannot validate field mappings, packaging variations, MOQ, pricing, or stock. There are also
+  open reports of correctly-configured sandbox apps returning 403. Sandbox apps are created under
+  a personal developer account (listed simply as "Apps"), not under an organization, which is
+  where Production Apps live.
+- **`KeywordSearch` data may be up to 24 hours stale** (DigiKey's FAQ says so and directs you to
+  `ProductDetails` for real-time pricing and availability). This is load-bearing, see D16.
+- **Server-side field projection exists** via an `Includes` parameter naming the fields to return.
+  Worth using: it shrinks payloads before they are parsed rather than after.
+- **VERIFIED on a live account:** one `ProductDetails` call returns every packaging variation
+  inline, each with its own `MinimumOrderQuantity`, `StandardPackage`,
+  `QuantityAvailableforPackageType`, `DigiReelFee`, and full `StandardPricing` ladder.
+  `RC0805FR-0710KL` returned 3 variations and 22 price breaks in a single response. So the
+  packaging policy (D4) costs no extra API calls, and a 60-line BOM stays near 60 calls.
+  Also confirmed: token flow works, the app subscription is live (HTTP 200), and
+  `x-ratelimit-limit: 1000` / `x-ratelimit-remaining: 999` come back as documented.
 - Free tier is self-serve at 1000 calls/day with no approval, and `X-RateLimit-Limit` /
   `X-RateLimit-Remaining` come back on every response.
 - Errors are real status codes (400/401/403/404/429/500/503) with a problem-details body
@@ -133,9 +166,27 @@ This is new versus Mouser and it has money attached. One MPN maps to several Dig
 numbers (cut tape, tape and reel, DigiReel), each with its own MOQ, `StandardPackage`, price
 ladder, and possibly a `DigiReelFee`. Picking silently would be wrong.
 
-Default policy: **cheapest landed total at the requested quantity among variations that are in
-stock and orderable**, where landed total includes per-line flat fees (see D4a), with ties broken
-toward the lower MOQ. Every priced line reports which variation was chosen and why, and
+Default policy: **lowest landed total after MOQ forcing**, among variations that are in stock and
+orderable, where
+
+    order_qty     = MOQ-forced quantity for that variation (see D4c)
+    landed_total  = order_qty * unit_price_at(order_qty) + flat_fees(variation)
+
+and ties break toward the lower MOQ. **"Cheapest at the requested quantity" is the wrong rule and
+was the original wording here.** Real observed data for `RC0805FR-0710KL`:
+
+| DigiKey PN | packaging | MOQ | std pkg | reel fee |
+|---|---|---|---|---|
+| `311-10.0KCRTR-ND` | tape and reel | **5000** | 0 | 0 |
+| `311-10.0KCRCT-ND` | cut tape | 1 | 0 | 0 |
+| `311-10.0KCRDKR-ND` | DigiReel | 1 | 1 | **7.00** |
+
+All three are in stock in the millions, so all three pass an "available and orderable" filter.
+The tape-and-reel unit price at 5000 units is far below the cut-tape price at 10 units, so any
+rule that compares unit prices, or compares totals at the *requested* quantity rather than the
+*forced* quantity, buys 5000 resistors when the user asked for 10. Comparing landed totals after
+MOQ forcing rejects it by roughly 80x. Cut tape and DigiReel are otherwise identical on MOQ and
+unit price, so the $7 fee is the only thing distinguishing them, which is why D4a exists. Every priced line reports which variation was chosen and why, and
 `--packaging <cut-tape|reel|digireel|any>` forces it. `--variations` shows the alternatives that
 were rejected. Never select a variation whose MOQ exceeds the requested quantity without saying
 so in the overbuy fields.
@@ -162,10 +213,30 @@ arrives in six months. Any line with `QuantityAvailable` below the needed quanti
 `blockers[]` entry carrying the expected date, never a footnote, and it trips the D13 push gate.
 `NormallyStocking`, `BackOrderNotAllowed`, and `ManufacturerLeadWeeks` feed the same judgement.
 
+### D4c. The MOQ formula must survive `StandardPackage == 0`
+The original formula was
+`order_qty = max(MinimumOrderQuantity, ceil(need / StandardPackage) * StandardPackage)`.
+
+**`StandardPackage` is 0 in real responses**, observed on two of three variations of
+`RC0805FR-0710KL` (both the tape-and-reel and the cut-tape options). In Go that formula is an
+integer divide-by-zero panic, on the most commonly ordered packaging type. Corrected:
+
+    if StandardPackage > 0:
+        order_qty = max(MOQ, ceil(need / StandardPackage) * StandardPackage)
+    else:
+        order_qty = max(MOQ, need)          # no packaging multiple constraint
+
+Zero means "no multiple required", not "multiple of zero". `RC0805FR-0710KL` becomes a permanent
+test fixture covering all three cases in one part: MOQ 5000 with std pkg 0, MOQ 1 with std pkg 0,
+and MOQ 1 with std pkg 1 plus a flat fee. Any part where MOQ, need, or std pkg is absent, null,
+or negative is a hard error on that line, never a silent default to 1.
+
 ### D4a. Flat per-line fees are a first-class term
-`DigiReelFee` is a discrete field and a flat charge per line item (order $7 of parts on a
-DigiReel and the fee can exceed the parts). It does not appear in unit price, so any arithmetic
-that only multiplies unit price by quantity under-reports the real total.
+`DigiReelFee` is a discrete field and a flat charge per line item, **observed as exactly 7.00**
+on `311-10.0KCRDKR-ND`. It does not appear in unit price, so any arithmetic that only multiplies
+unit price by quantity under-reports the real total. Cut tape and DigiReel for that part are
+identical on MOQ and unit price, so without fees in the comparison the tool would pick DigiReel
+on a tiebreak roughly half the time and silently add $7 per line, which on a 40-line BOM is $280.
 
 Therefore: fees are a named term in the line total, in `overbuy_cost`, and in the D4 variation
 comparison, never folded into a unit price. The terminal table grows a `fees` column whenever
@@ -232,13 +303,38 @@ it is money), nothing about a specific order ever. `--refresh`, `--no-cache`.
 Every response reports `meta.cache = {hit, age_s, ttl_s, stale}`. Pricing refuses to serve
 stale data under rate limiting rather than quoting an old price.
 
-### D10. Test against the sandbox, and pin the contract
-DigiKey's sandbox replaces the whole record/replay subsystem the Mouser plan needed. Integration
-tests run against sandbox in CI. On top of that, contract tests assert the field mappings this
-tool depends on (`MinimumOrderQuantity`, `StandardPackage`, `QuantityAvailable`, the status
-booleans) still exist and still have the expected types, so a DigiKey change breaks a test
-rather than a user's BOM. The zero-auth handoff gets a live smoke test, since it has no sandbox
-and its response shape is already known to differ from its documentation.
+### D16. `ProductDetails` for money, `KeywordSearch` for discovery
+`KeywordSearch` responses may be up to 24 hours stale. Pricing a BOM off day-old stock and
+prices while presenting it as current is precisely the quiet wrongness this tool exists to
+prevent: a part with 3 left in stock, or a price that moved, would be reported confidently wrong.
+
+So the two endpoints have separate jobs and are not interchangeable:
+- `KeywordSearch`: discovery, matching, candidate ranking, parametric filtering. Cacheable for
+  24h because it is already cached upstream anyway.
+- `ProductDetails`: every number that informs a purchase. One call per resolved BOM line.
+  Short cache TTL (1h), and `bom price` reports `data_age_s` per line so staleness is visible
+  rather than implied.
+
+Call budget consequence: a 60-line BOM costs ~60 `ProductDetails` calls plus whatever matching
+required, against a 1000/day quota. Acceptable, but it makes the response cache load-bearing
+rather than a nicety, and it makes `bom resolve` (which pins parts once) worth having so that
+re-pricing an already-resolved BOM skips the matching calls entirely.
+
+### D10. Record/replay cassettes, because the sandbox cannot test behavior
+The sandbox is an auth check that returns a canned product, so it validates the token flow and
+nothing else. Use it for exactly that, in one test, and do not build a strategy on it.
+
+Real strategy, same as the archived Mouser plan needed:
+- **Cassettes.** `DK_CASSETTE_DIR` records real production responses once; the suite then runs
+  offline against them. This is the only way to test packaging selection, MOQ math, and fee
+  arithmetic against real shapes without burning quota on every CI run.
+- **Contract tests** run on a schedule (not every commit) against production with a tiny quota
+  footprint, asserting the fields this tool depends on still exist with the expected types:
+  `MinimumOrderQuantity`, `StandardPackage`, `QuantityAvailable`, `DigiReelFee`, `TariffActive`,
+  and the status booleans. A DigiKey change should break a scheduled test, not a user's BOM.
+- **Cassettes must be scrubbed** of tokens and client IDs before commit, enforced by a test.
+- The zero-auth handoff gets a live smoke test, since it has no sandbox at all and its response
+  shape already differs from its documentation.
 
 ### D11. The CLI cannot spend money, by construction
 No ordering API client exists in the binary. No 3-legged OAuth flow exists, so the tool holds
@@ -289,9 +385,20 @@ transcripts), never log a token or a secret, and the redaction sink stays (a sin
 scrubs both secret values and any bearer token from every emitted line) because access tokens
 still exist in memory and in `Authorization` headers that a verbose HTTP dump would print.
 
-Token cache: `$XDG_STATE_HOME/dk/token.json`, mode 0600, holding the access token and expiry.
-Refresh when expired or within a 60s skew. Concurrent invocations must not stampede the token
-endpoint, so the cache write is atomic and a lock guards refresh.
+### D15. Token cache sized for a 10-minute token
+Tokens live 10 minutes, so the cache is not an optimization, it is required: without it a
+40-invocation agent session would hit the token endpoint 40 times.
+
+`$XDG_STATE_HOME/dk/token.json`, mode 0600, holding the access token and an absolute expiry.
+Refresh when expired or within a 30s skew (a 60s skew against a 600s token wastes 10% of its
+life). The write is atomic (temp file plus rename) and a `flock` guards refresh so concurrent
+invocations coalesce onto one token request rather than stampeding. A refresh failure must be
+distinguishable from an API failure in the error envelope, because the fixes are different: bad
+credentials versus an unsubscribed app versus a network problem.
+
+Sandbox and production credentials are separate applications, so the token cache and the
+response cache are both keyed by environment. A sandbox token must never be usable against
+production, and cached sandbox responses must never be served to a production query.
 
 ### pix wiring
 Host-side `op read` at provision time, injected with `sbx secret set`, surfaced in-VM as the
@@ -327,9 +434,8 @@ responses into one decision. Rules that make it trustworthy:
 - **No exact match: never guess.** `status:"unmatched"` plus top-3 scored candidates, run exits
   9. Fix path is `bom resolve` writing a committed `bom.lock` that pins part number and
   packaging variation, so the next run is deterministic.
-- **MOQ and standard package:** always compute
-  `order_qty = max(MinimumOrderQuantity, ceil(need / StandardPackage) * StandardPackage)` and
-  always surface `need`, `order_qty`, `overbuy_units`, `overbuy_cost`. Silent rounding is the
+- **MOQ and standard package:** compute per D4c, and always surface `need`, `order_qty`,
+  `overbuy_units`, `overbuy_cost`. Silent rounding is the
   fastest way to lose trust, and you discover it at checkout when the total is higher than the
   report said.
 - **Price at `order_qty`, never at `need`.** Also emit `next_break {qty, unit_price,
@@ -427,8 +533,7 @@ pack.
    3-legged. If 2-legged works, `dk order history` becomes possible with no new credential
    class, which would be a nice-to-have for "what did I buy last time". If it needs 3-legged,
    it is cut. Cheap to probe once registered.
-3. **Sandbox fidelity.** Whether sandbox returns realistic `ProductVariations`, MOQ, and
-   pricing, or placeholder data. Determines how much of D4 can be tested without burning
-   production quota.
+3. RESOLVED. One `ProductDetails` call returns all variations with MOQ, standard package, fees,
+   and full price ladders. See the verified note in section 2.
 4. **pix pack specifics** (manifest schema, PATH symlinking, secret-to-env mapping) cannot be
    verified from inside the sandbox and must be checked against the host implementation.
