@@ -162,8 +162,15 @@ func (c *Client) SearchOrders(ctx context.Context, opts OrderSearchOptions) (*Or
 		q.Set("EndDate", opts.End.Format("2006-01-02"))
 	}
 
-	path := orderStatusBase + "/OrderHistory/SearchOrders?" + q.Encode()
-	raw, err := c.do(ctx, http.MethodGet, path, nil)
+	// GET /orderstatus/v4/orders. The developer portal renders this operation
+	// under an "OrderHistory / SearchOrders" heading, which are the group and
+	// operation names, NOT path segments: using them returns a 404 with
+	// "Invalid resource path".
+	path := orderStatusBase + "/orders?" + q.Encode()
+	// The account id is REQUIRED here under 2-legged auth: without it DigiKey
+	// cannot tell whose sales orders to return.
+	raw, err := c.doWithHeaders(ctx, http.MethodGet, path, nil,
+		map[string]string{"X-DIGIKEY-Account-Id": c.accountID})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -192,7 +199,10 @@ func (c *Client) RetrieveSalesOrder(ctx context.Context, salesOrderID string) (*
 	if id == "" {
 		return nil, nil, errors.New("dkapi: empty sales order id")
 	}
-	path := orderStatusBase + "/OrderHistory/SalesOrder/" + url.PathEscape(id)
+	// GET /orderstatus/v4/salesorder/{id}. This endpoint must NOT receive the
+	// account-id header: DigiKey's changelog says to remove it, and it resolves
+	// the order against every account linked to the authenticated user instead.
+	path := orderStatusBase + "/salesorder/" + url.PathEscape(id)
 	raw, err := c.do(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, nil, err

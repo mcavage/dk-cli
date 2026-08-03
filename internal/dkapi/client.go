@@ -156,6 +156,16 @@ type problemDetails struct {
 // do performs a request with auth and locale headers, capturing quota headers
 // and mapping errors. It returns raw bytes so callers can retain them.
 func (c *Client) do(ctx context.Context, method, path string, body any) ([]byte, error) {
+	return c.doWithHeaders(ctx, method, path, body, nil)
+}
+
+// doWithHeaders is do plus per-request headers.
+//
+// The account-id header is deliberately NOT global. It is required by
+// SearchOrders under 2-legged auth and explicitly must not be sent to
+// RetrieveSalesOrder, per DigiKey's own changelog, so which endpoints get it is
+// a per-call decision rather than a client-wide default.
+func (c *Client) doWithHeaders(ctx context.Context, method, path string, body any, extra map[string]string) ([]byte, error) {
 	token, err := c.tokens.Token(ctx)
 	if err != nil {
 		return nil, err
@@ -179,10 +189,10 @@ func (c *Client) do(ctx context.Context, method, path string, body any) ([]byte,
 	req.Header.Set("X-DIGIKEY-Locale-Site", c.cfg.Site)
 	req.Header.Set("X-DIGIKEY-Locale-Currency", c.cfg.Currency)
 	req.Header.Set("X-DIGIKEY-Locale-Language", c.cfg.Language)
-	if c.accountID != "" {
-		// Optional for 3-legged, REQUIRED for 2-legged order history. Sending it
-		// on every call is harmless and avoids a per-endpoint special case.
-		req.Header.Set("X-DIGIKEY-Account-Id", c.accountID)
+	for k, v := range extra {
+		if v != "" {
+			req.Header.Set(k, v)
+		}
 	}
 	req.Header.Set("Accept", "application/json")
 	if body != nil {

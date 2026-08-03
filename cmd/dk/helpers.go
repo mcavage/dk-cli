@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"strings"
 
 	"github.com/mcavage/dk-cli/internal/config"
 	"github.com/mcavage/dk-cli/internal/dkapi"
@@ -97,6 +98,19 @@ func classifyDKErr(err error) *output.Error {
 		case apiErr.Status == 429:
 			return output.NewError(output.RateLimited, apiErr.Error(), true,
 				"wait for the daily quota to reset, or reduce the request size").WithDetails(details)
+		case apiErr.Status == 404 && strings.Contains(
+			strings.ToLower(apiErr.Detail), "invalid resource path"):
+			// This is not a missing part and not an outage: it means this binary
+			// asked for an endpoint DigiKey does not serve. Telling the user to
+			// retry would have them retry forever against a bug in here.
+			return output.NewError(output.Internal, apiErr.Error(), false,
+				"this is a bug in dk, not a problem with your account or network: "+
+					"it requested an endpoint DigiKey does not serve. Please report the "+
+					"endpoint and correlationId above.").WithDetails(details)
+		case apiErr.Status == 404:
+			return output.NewError(output.NoMatch, apiErr.Error(), false,
+				"check the identifier; for an order, use the SALES ORDER id from the "+
+					"packing slip, not the order number").WithDetails(details)
 		default:
 			return output.NewError(output.UpstreamError, apiErr.Error(), apiErr.Retryable(),
 				"retry the command; if it persists, check DigiKey's status").WithDetails(details)
