@@ -301,7 +301,7 @@ func registry() []command {
 		{
 			Group: "bom", Verb: "resolve",
 			NeedsAuth: true,
-			Summary:   "Parse and normalize a BOM into a deterministic bom.lock (merges duplicates, records skips).",
+			Summary:   "Pin every BOM line to a DigiKey part number and packaging, into a lock file.",
 			Args:      []argSpec{{Name: "file", Usage: "path to a BOM CSV (or KiCad export)"}},
 			Flags: []flagSpec{
 				{Name: "o", Kind: kindString, Default: "bom.lock", Usage: "output path for the pinned artifact"},

@@ -54,6 +54,9 @@ func TestRun_StdoutIsExactlyOneJSONDocument(t *testing.T) {
 	// Exercise a mix of success and failure paths, with and without
 	// credentials, across several commands: whatever happens internally,
 	// exactly one JSON line must land on stdout and nothing else.
+	// No args is excluded because help intercepts it and prints human text;
+	// help and --human are the two documented exceptions to this rule, and both
+	// have their own tests. Every path an AGENT takes still lands here.
 	// doctor is deliberately excluded here: through the full dispatch path
 	// (not the fake-handoff seam TestDoctor_DegradesWithNoCredentials uses)
 	// it makes a real network call to the zero-auth handoff, which this
@@ -63,7 +66,6 @@ func TestRun_StdoutIsExactlyOneJSONDocument(t *testing.T) {
 		{"schema"},
 		{"agents-md"},
 		{"auth", "status"},
-		{}, // no args
 		{"bogus"},
 		{"part", "search"},                // missing arg
 		{"part", "search", "x", "--nope"}, // unknown flag

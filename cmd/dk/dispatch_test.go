@@ -28,7 +28,9 @@ func TestDispatch_Table(t *testing.T) {
 		wantExit int
 		wantCode output.Code
 	}{
-		{"no args", nil, output.ExitUsage, output.MissingArg},
+		// No args is deliberately absent: it is intercepted by help before
+		// dispatch is reached. See TestHelpExitCodes, which asserts it still
+		// exits 2 while printing human help.
 		{"unknown top command", []string{"frobnicate"}, output.ExitUsage, output.UnknownFlag},
 		{"unknown subcommand", []string{"part", "serach"}, output.ExitUsage, output.UnknownFlag},
 		{"missing subcommand", []string{"part"}, output.ExitUsage, output.MissingArg},
@@ -116,15 +118,18 @@ func TestDispatch_FlagBeforeOrAfterPositional(t *testing.T) {
 	}
 }
 
-func TestDispatch_Help(t *testing.T) {
+// --help is human text now, not an envelope. Asserting the old JSON shape here
+// would just re-encode the bug: someone typing --help and getting one line of
+// schema JSON has been told nothing. The human behavior is covered by
+// TestHelpIsHumanReadableNotJSON and TestHelpCommandListsEveryFlagAndArg.
+func TestDispatch_HelpIsInterceptedBeforeDispatch(t *testing.T) {
 	for _, argv := range [][]string{{"--help"}, {"-h"}, {"part", "--help"}, {"part", "search", "--help"}} {
-		r := runCapture(t, argv...)
-		env := r.envelope(t)
-		if ok, _ := env["ok"].(bool); !ok {
-			t.Fatalf("--help should always succeed: %v", env)
+		out, _, code := runArgs(t, argv...)
+		if code != output.ExitOK {
+			t.Errorf("%v exit = %d, want 0", argv, code)
 		}
-		if env["command"] != "help" {
-			t.Fatalf("command = %v, want %q", env["command"], "help")
+		if strings.HasPrefix(strings.TrimSpace(out), "{") {
+			t.Errorf("%v printed an envelope instead of help:\n%s", argv, out)
 		}
 	}
 }

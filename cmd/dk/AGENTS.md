@@ -68,3 +68,16 @@ individual `--help` output N times; `dk schema` is the same data in one call.
 
 `dk` is an independent, unofficial tool. It is not affiliated with, endorsed
 by, or supported by DigiKey Electronics.
+
+## Help is for humans, `schema` is for you
+
+`dk help`, `dk --help` and a bare `dk` print human text, not an envelope. That
+is the one place this tool does not emit JSON, and it is deliberate: nobody
+pipes `--help` to a parser.
+
+Run `dk schema` once at the start of a session. It returns the entire command
+surface, every flag with its type and default, the exit code table and the
+envelope shape, in one call. Do not call `--help` per subcommand to learn the
+tool; that is N calls to learn what one call already told you.
+
+`dk help --json` is an alias for `dk schema` if you land there by accident.

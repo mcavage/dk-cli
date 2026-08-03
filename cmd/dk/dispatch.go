@@ -56,7 +56,10 @@ func dispatch(argv []string, w *output.Writer) (*output.Envelope, string) {
 		return output.Failure(group, output.NewError(output.MissingArg,
 			fmt.Sprintf("missing subcommand for %q", group), false,
 			fixString(group, "<"+strings.Join(verbs, "|")+">")).
-			WithDetails(map[string]any{"valid_subcommands": verbs})), ""
+			WithDetails(map[string]any{
+				"valid_subcommands": verbs,
+				"help":              "dk help " + group,
+			})), ""
 	}
 
 	verb := argv[1]

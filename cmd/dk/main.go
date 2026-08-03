@@ -19,6 +19,22 @@ func main() {
 func run(argv []string, stdout, stderr io.Writer) int {
 	w := output.NewWriter(stdout, stderr)
 
+	// Help is intercepted before dispatch so it works even when the rest of the
+	// line is nonsense, which is exactly when someone reaches for it.
+	if _, ok := isHelpRequest(argv); ok && wantsJSONHelp(argv) {
+		// The machine path is not lost: `dk help --json` is the schema, which is
+		// the canonical machine-readable surface.
+		argv = []string{"schema"}
+	} else if topic, ok := isHelpRequest(argv); ok {
+		fmt.Fprint(stdout, helpTopic(topic))
+		// Asking for help succeeded. Running dk with no command at all did not,
+		// so that keeps a usage exit code even though it prints the same text.
+		if len(argv) == 0 {
+			return output.ExitUsage
+		}
+		return output.ExitOK
+	}
+
 	env, tableText := dispatch(argv, w)
 
 	// --human replaces the JSON on stdout rather than sitting beside it, so the
