@@ -556,3 +556,73 @@ func bomPush(rc *runContext, args []string, fv *flagValues) (*output.Envelope, s
 	}
 	return env, ""
 }
+
+// bomCheck parses a BOM and reports exactly what it read, with no network and
+// no credentials.
+//
+// This is the first question anyone has about a hand-written BOM: which column
+// did it take the order quantity from, which rows did it skip and why, what did
+// it merge. Answering that used to require credentials, because the only way to
+// see a parse was to price it, which meant the cheapest sanity check was gated
+// behind the most expensive setup step.
+func bomCheck(rc *runContext, args []string, fv *flagValues) (*output.Envelope, string) {
+	file := args[0]
+
+	colMap, cerr := parseColumns(fv.Str("columns"))
+	if cerr != nil {
+		return output.Failure("bom.check", output.NewError(output.BadArg, cerr.Error(), false,
+			"dk bom check "+file+" --columns mpn=MPN,qty=Buy")), ""
+	}
+
+	b, err := bom.ParseFile(file, bom.Options{ColumnMap: colMap, DefaultQty: 1})
+	if err != nil {
+		return output.Failure("bom.check", output.NewError(output.BOMInvalid, err.Error(), false,
+			"dk bom check "+file+" --columns mpn=<header>,qty=<header>")), ""
+	}
+
+	qtyColumn := ""
+	needsReview := []map[string]any{}
+	for _, l := range b.Lines {
+		if qtyColumn == "" {
+			qtyColumn = l.QtyColumn
+		}
+		if l.Qualifier.NeedsReview() {
+			needsReview = append(needsReview, map[string]any{
+				"mpn":       l.MPN,
+				"raw":       l.RawQty,
+				"read_as":   l.Qty,
+				"qualifier": string(l.Qualifier),
+			})
+		}
+	}
+
+	env := output.Success("bom.check", map[string]any{
+		"source":          b.Source,
+		"lines":           b.Lines,
+		"line_count":      len(b.Lines),
+		"total_units":     b.TotalUnits(),
+		"quantity_column": qtyColumn,
+		"skipped":         b.Skips,
+		"needs_review":    needsReview,
+		"notes":           b.Notes,
+	})
+	// One summary warning, not one per skip. The skipped rows are already in
+	// the payload with their reasons, so repeating each as a warning is noise
+	// in JSON and duplicated text under --human.
+	if len(b.Skips) > 0 {
+		env.AddWarning(output.Warning{Code: output.Code("ROWS_SKIPPED"),
+			Message: fmt.Sprintf("%d row(s) not ordered; see skipped[] for the reason on each",
+				len(b.Skips))})
+	}
+	for _, n := range b.Notes {
+		env.AddWarning(output.Warning{Code: output.Code("PARSE_NOTE"), Message: n})
+	}
+	if len(needsReview) > 0 {
+		// A hedge in the source document ("8+", "~6", "1-2") became a concrete
+		// number. That number is about to be ordered, so it is worth a look.
+		env.AddWarning(output.WarnPartial(fmt.Sprintf(
+			"%d line(s) had an imprecise quantity in the source and were resolved to a "+
+				"concrete number; check them before pricing", len(needsReview))))
+	}
+	return env, ""
+}

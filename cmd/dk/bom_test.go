@@ -576,3 +576,64 @@ func TestGateReasons_UnreadableOverbuyTotalRefuses(t *testing.T) {
 		t.Fatalf("want a refusal for an unreadable total, got %v", got)
 	}
 }
+
+// bom check must work with no credentials. It is the cheapest sanity check on
+// a hand-written BOM, and gating it behind the most expensive setup step meant
+// nobody could confirm a parse before paying for a token.
+func TestBomCheck_NeedsNoCredentials(t *testing.T) {
+	t.Setenv("DK_CLIENT_ID", "")
+	t.Setenv("DK_CLIENT_SECRET", "")
+
+	path := writeBOM(t, "Part,Qty,On hand,Buy\nTL072CP,4,1,3\n1N4148,22,14,8+\nCD74HC4051E,3,3,\n")
+	r := runCapture(t, "bom", "check", path)
+	if r.Exit != output.ExitOK && r.Exit != output.ExitPartial {
+		t.Fatalf("exit = %d, want 0 or 9: %s", r.Exit, r.Stdout)
+	}
+
+	env := r.envelope(t)
+	data := env["data"].(map[string]any)
+
+	// The whole point: prove which column funded the order.
+	if got := data["quantity_column"]; got != "Buy" {
+		t.Fatalf("quantity_column = %v, want Buy", got)
+	}
+	if got := data["line_count"].(float64); got != 2 {
+		t.Fatalf("line_count = %v, want 2 (the third row is fully on hand)", got)
+	}
+	// 3 + 8, not 4 + 22.
+	if got := data["total_units"].(float64); got != 11 {
+		t.Fatalf("total_units = %v, want 11", got)
+	}
+
+	// An imprecise source quantity became a concrete number that is about to be
+	// ordered, so it has to be surfaced rather than silently accepted.
+	review := data["needs_review"].([]any)
+	if len(review) != 1 {
+		t.Fatalf("want 1 line flagged for review, got %v", review)
+	}
+	if raw := review[0].(map[string]any)["raw"]; raw != "8+" {
+		t.Fatalf("want the raw source text kept, got %v", raw)
+	}
+}
+
+// Five skipped rows must not become five warnings. The reasons are already in
+// the payload, and repeating each one is noise in JSON and duplicated text
+// under --human.
+func TestBomCheck_SkipsAreOneSummaryWarning(t *testing.T) {
+	path := writeBOM(t, "Part,Qty,On hand,Buy\nA,1,1,\nB,2,2,\nC,3,3,\nD,4,0,4\n")
+	r := runCapture(t, "bom", "check", path)
+	env := r.envelope(t)
+
+	n := 0
+	for _, w := range env["warnings"].([]any) {
+		if w.(map[string]any)["code"] == "ROWS_SKIPPED" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("want exactly 1 skip summary warning, got %d", n)
+	}
+	if len(env["data"].(map[string]any)["skipped"].([]any)) != 3 {
+		t.Fatal("the individual reasons must still be in the payload")
+	}
+}

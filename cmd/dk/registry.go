@@ -284,6 +284,17 @@ func registry() []command {
 			Run:       partPrice,
 		},
 		{
+			Group: "bom", Verb: "check",
+			Summary: "Parse a BOM and show exactly what was read. No credentials, no network.",
+			Args:    []argSpec{{Name: "file", Usage: "path to a BOM (CSV, KiCad export, or markdown table)"}},
+			Flags: []flagSpec{
+				{Name: "columns", Kind: kindString, Default: "", Usage: "column remap, e.g. mpn=Part,qty=Buy"},
+			},
+			NeedsAuth: false,
+			Example:   "dk bom check bom.md --human",
+			Run:       bomCheck,
+		},
+		{
 			Group: "bom", Verb: "price",
 			Summary: "Price an entire BOM: the terminal review artifact before a cart handoff.",
 			Args:    []argSpec{{Name: "file", Usage: "path to a BOM CSV (or KiCad export)"}},

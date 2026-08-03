@@ -45,6 +45,8 @@ func renderHuman(env *output.Envelope, color bool) string {
 		b.WriteString(renderPartDetail(env.Data))
 	case "part.price":
 		b.WriteString(renderKV(env.Data))
+	case "bom.check":
+		b.WriteString(renderBOMCheck(env.Data))
 	case "orders.list":
 		b.WriteString(renderOrders(env.Data))
 	case "order.get":
@@ -406,4 +408,79 @@ func intStr(v any) string {
 		return fmt.Sprint(n)
 	}
 	return str(v)
+}
+
+func renderBOMCheck(data any) string {
+	m := asMap(data)
+	lines := asSlice(m["lines"])
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s\n", str(m["source"]))
+	if qc := str(m["quantity_column"]); qc != "" {
+		// Which column funded the order is the single most important thing to
+		// confirm on a hand-written BOM: reading "Qty" instead of "Buy" orders
+		// parts already sitting in a drawer.
+		fmt.Fprintf(&b, "ordering from column: %s\n", qc)
+	}
+	fmt.Fprintf(&b, "\n%s lines, %s units total\n\n",
+		intStr(m["line_count"]), intStr(m["total_units"]))
+
+	if len(lines) > 0 {
+		cols := []table.Column{
+			{Header: "MPN", MaxWidth: 32},
+			{Header: "ORDER", Align: table.Right},
+			{Header: "NEED", Align: table.Right},
+			{Header: "HAVE", Align: table.Right},
+			{Header: "RAW", MaxWidth: 8},
+			{Header: "REFDES", MaxWidth: 18},
+		}
+		var rows [][]string
+		for _, l := range lines {
+			rows = append(rows, []string{
+				str(l["mpn"]), intStr(l["qty"]),
+				nonNegative(l["need"]), nonNegative(l["on_hand"]),
+				str(l["raw_qty"]), joinAny(l["refdes"]),
+			})
+		}
+		b.WriteString(table.Render(cols, rows))
+	}
+
+	if skips := asSlice(m["skipped"]); len(skips) > 0 {
+		b.WriteString("\nnot ordered\n")
+		for _, s := range skips {
+			fmt.Fprintf(&b, "  row %s  %s\n", intStr(s["row"]), str(s["reason"]))
+		}
+	}
+	if nr := asSlice(m["needs_review"]); len(nr) > 0 {
+		b.WriteString("\ncheck these quantities\n")
+		for _, r := range nr {
+			fmt.Fprintf(&b, "  %-36s %-6q read as %-4s (%s)\n",
+				shortSummary(str(r["mpn"]), 34), str(r["raw"]),
+				intStr(r["read_as"]), str(r["qualifier"]))
+		}
+	}
+	return b.String()
+}
+
+// nonNegative hides the -1 sentinel meaning "the document did not say".
+func nonNegative(v any) string {
+	if f, ok := v.(float64); ok && f < 0 {
+		return "-"
+	}
+	if s := intStr(v); s != "" {
+		return s
+	}
+	return "-"
+}
+
+func joinAny(v any) string {
+	items, ok := v.([]any)
+	if !ok {
+		return ""
+	}
+	var parts []string
+	for _, i := range items {
+		parts = append(parts, str(i))
+	}
+	return strings.Join(parts, ",")
 }
