@@ -15,7 +15,7 @@ PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64
 # attaches a debugger to, and it cuts the download roughly in half.
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build test check dist clean install checksums
+.PHONY: build test check fmtcheck ignorecheck dist clean install checksums
 
 build:
 	go build -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/dk
@@ -27,10 +27,26 @@ test:
 	go test ./...
 
 # What CI runs and what must pass before a tag.
-check:
-	gofmt -l . | tee /dev/stderr | (! read)
+check: fmtcheck ignorecheck
 	go vet ./...
 	go test ./...
+
+# POSIX sh, because make runs /bin/sh and the `(! read)` idiom is a bashism
+# that fails under dash with "read: arg count".
+fmtcheck:
+	@out="$$(gofmt -l .)"; \
+	if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
+
+# A gitignored .go file is essentially never intentional, and it fails in the
+# worst possible way: `git add -A` succeeds, local builds pass because the file
+# is on disk, and the commit ships a feature it does not contain. This repo
+# already lost cmd/dk/orders.go to an unanchored "dk" pattern that matched the
+# cmd/dk directory.
+ignorecheck:
+	@out="$$(git ls-files --others --ignored --exclude-standard | grep '\.go$$' || true)"; \
+	if [ -n "$$out" ]; then \
+	  echo "these .go files are gitignored and would not be committed:"; \
+	  echo "$$out"; exit 1; fi
 
 dist: clean
 	@mkdir -p $(DIST)
