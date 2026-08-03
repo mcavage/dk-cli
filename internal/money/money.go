@@ -52,6 +52,11 @@ func ParseMicro(s string) (Micro, error) {
 	if intPart == "" && !hasFrac {
 		return 0, fmt.Errorf("%w: %q", ErrNotANumber, s)
 	}
+	// A lone separator is not zero. ".", "-." and "$." previously parsed as
+	// $0.00, which turns a malformed price cell into a free part.
+	if intPart == "" && fracPart == "" {
+		return 0, fmt.Errorf("%w: %q has no digits", ErrNotANumber, s)
+	}
 	if intPart == "" {
 		intPart = "0"
 	}
@@ -62,6 +67,14 @@ func ParseMicro(s string) (Micro, error) {
 	whole, err := strconv.ParseInt(intPart, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("%w: %q", ErrNotANumber, s)
+	}
+	// Overflow must be an error, never a wrapped negative. An unchecked
+	// whole*scale turns a deliberately huge spend limit into a NEGATIVE amount,
+	// which then skips every "limit >= 0" guard and silently disables the very
+	// check the caller was trying to raise.
+	const maxWhole = math.MaxInt64/scale - 1
+	if whole > maxWhole || whole < -maxWhole {
+		return 0, fmt.Errorf("%w: %q is out of range", ErrNotANumber, s)
 	}
 
 	var frac int64

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -32,6 +34,7 @@ import (
 type PricedBOM struct {
 	Version     int       `json:"version"`
 	Source      string    `json:"source"`
+	SourceHash  string    `json:"source_hash,omitempty"`
 	GeneratedAt time.Time `json:"generated_at"`
 
 	Lines []PricedLine `json:"lines"`
@@ -74,6 +77,7 @@ func NewPricedBOM(source string, rep *report.Report) *PricedBOM {
 	a := &PricedBOM{
 		Version:          pricedBOMVersion,
 		Source:           source,
+		SourceHash:       hashFile(source),
 		GeneratedAt:      time.Now().UTC(),
 		MerchandiseTotal: rep.MerchandiseTotal.String(),
 		TotalFees:        rep.TotalFees.String(),
@@ -189,12 +193,54 @@ func (a *PricedBOM) GateReasons(overbuyLimit money.Micro) []string {
 		out = append(out, "unmatched: "+u)
 	}
 	if overbuyLimit >= 0 {
-		if got, err := money.ParseMicro(a.TotalOverbuyCost); err == nil && got > overbuyLimit {
+		got, err := money.ParseMicro(a.TotalOverbuyCost)
+		switch {
+		case err != nil:
+			// Refuse rather than skip. An unreadable total silently passing the
+			// overbuy check is exactly the outcome a hand-edited artifact wants.
+			out = append(out, fmt.Sprintf(
+				"cannot read total_overbuy_cost %q, so the overbuy limit cannot be enforced",
+				a.TotalOverbuyCost))
+		case got > overbuyLimit:
 			out = append(out, fmt.Sprintf("overbuy cost %s exceeds limit %s",
 				got.String(), overbuyLimit.String()))
 		}
 	}
 	return dedupe(out)
+}
+
+// MatchesSource reports whether this artifact was priced from the given BOM
+// file, by content rather than by name.
+//
+// Without this check, `dk bom push new.csv --report old.json` reviews one BOM
+// and fills the cart from another: the BOM argument is parsed, validated, and
+// then never used, because every pushed line comes from the artifact. It also
+// closes the hand-edit hole, since editing the BOM after pricing invalidates
+// the hash.
+func (a *PricedBOM) MatchesSource(path string) error {
+	if a.SourceHash == "" {
+		return fmt.Errorf("artifact %s predates source binding and cannot be verified; "+
+			"re-run `dk bom price %s --out ...`", a.Source, path)
+	}
+	got := hashFile(path)
+	if got == "" {
+		return fmt.Errorf("cannot read %s to verify it against the priced report", path)
+	}
+	if got != a.SourceHash {
+		return fmt.Errorf("the priced report was made from %s, which no longer matches %s "+
+			"(the file changed, or this is a different BOM); re-run `dk bom price %s --out ...`",
+			a.Source, path, path)
+	}
+	return nil
+}
+
+func hashFile(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }
 
 // Stale reports whether the artifact is old enough that its prices and stock

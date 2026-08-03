@@ -137,9 +137,10 @@ func UnitPriceAt(breaks []PriceBreak, qty int) (money.Micro, error) {
 	if len(breaks) == 0 {
 		return 0, errors.New("pricing: variation has no price breaks")
 	}
-	sorted := make([]PriceBreak, len(breaks))
-	copy(sorted, breaks)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].BreakQuantity < sorted[j].BreakQuantity })
+	sorted := normalizeBreaks(breaks)
+	if len(sorted) == 0 {
+		return 0, errors.New("pricing: variation has no usable price breaks")
+	}
 
 	if qty < sorted[0].BreakQuantity {
 		return 0, fmt.Errorf("pricing: quantity %d is below the lowest price break of %d",
@@ -157,11 +158,40 @@ func UnitPriceAt(breaks []PriceBreak, qty int) (money.Micro, error) {
 	return price, nil
 }
 
+// normalizeBreaks sorts a ladder and collapses duplicate quantities to the
+// cheapest price at that quantity.
+//
+// Two rungs at the same quantity is real malformed data, and sort.Slice is not
+// stable, so without this the price depends on input order: a ladder with
+// {10, $0.01} and {10, $0.09} could quote either. Picking the cheapest is the
+// only defensible choice, since DigiKey will not charge more than its own
+// published price at that quantity.
+//
+// Non-positive prices are dropped, not treated as free. A $0.00 unit price is a
+// quote-only or restricted variation, and treating it as real makes it win
+// every landed-total comparison and puts a $0.00 line in front of a human as if
+// it were ordinary.
+func normalizeBreaks(breaks []PriceBreak) []PriceBreak {
+	best := make(map[int]money.Micro, len(breaks))
+	for _, b := range breaks {
+		if b.BreakQuantity <= 0 || b.UnitPrice <= 0 {
+			continue
+		}
+		if cur, ok := best[b.BreakQuantity]; !ok || b.UnitPrice < cur {
+			best[b.BreakQuantity] = b.UnitPrice
+		}
+	}
+	out := make([]PriceBreak, 0, len(best))
+	for q, p := range best {
+		out = append(out, PriceBreak{BreakQuantity: q, UnitPrice: p})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].BreakQuantity < out[j].BreakQuantity })
+	return out
+}
+
 // nextBreakAfter finds the next rung above qty, if any.
 func nextBreakAfter(breaks []PriceBreak, qty int) *PriceBreak {
-	sorted := make([]PriceBreak, len(breaks))
-	copy(sorted, breaks)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].BreakQuantity < sorted[j].BreakQuantity })
+	sorted := normalizeBreaks(breaks)
 	for i := range sorted {
 		if sorted[i].BreakQuantity > qty {
 			return &sorted[i]

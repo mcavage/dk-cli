@@ -177,3 +177,33 @@ func TestRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// A lone separator is not zero. ".", "-." and "$." previously parsed as $0.00,
+// which turns a malformed price cell into a free part.
+func TestParseMicro_LoneSeparatorIsNotZero(t *testing.T) {
+	for _, s := range []string{".", "-.", "+.", "$."} {
+		if got, err := ParseMicro(s); err == nil {
+			t.Errorf("ParseMicro(%q) = %d, want an error", s, got)
+		}
+	}
+}
+
+// Overflow must be an error, never a wrapped negative. An unchecked whole*scale
+// turned a deliberately huge spend limit into a NEGATIVE amount, which then
+// skipped every "limit >= 0" guard and silently disabled the check the caller
+// was trying to raise.
+func TestParseMicro_OverflowIsAnErrorNotANegative(t *testing.T) {
+	for _, s := range []string{"10000000000000", "9223372036854776", "-10000000000000"} {
+		got, err := ParseMicro(s)
+		if err == nil {
+			t.Errorf("ParseMicro(%q) = %d, want an out-of-range error", s, got)
+		}
+		if got < 0 && err == nil {
+			t.Errorf("ParseMicro(%q) wrapped to a negative amount: %d", s, got)
+		}
+	}
+	// A large but representable amount still works.
+	if _, err := ParseMicro("1000000.00"); err != nil {
+		t.Errorf("a realistic large total must still parse: %v", err)
+	}
+}

@@ -306,3 +306,68 @@ func TestSelect_EveryRejectionHasAReason(t *testing.T) {
 		}
 	}
 }
+
+// Two rungs at the same quantity is real malformed data, and sort.Slice is not
+// stable, so without normalization the quoted price depends on input order.
+func TestUnitPriceAt_DuplicateBreakQuantityPicksCheapest(t *testing.T) {
+	m := func(s string) money.Micro {
+		v, _ := money.ParseMicro(s)
+		return v
+	}
+	for _, breaks := range [][]PriceBreak{
+		{{1, m("0.10")}, {10, m("0.01")}, {10, m("0.09")}},
+		{{1, m("0.10")}, {10, m("0.09")}, {10, m("0.01")}},
+	} {
+		got, err := UnitPriceAt(breaks, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != m("0.01") {
+			t.Fatalf("want the cheaper duplicate 0.01, got %s", got.Exact())
+		}
+	}
+}
+
+// A $0.00 unit price is a quote-only or restricted variation, not a free part.
+// Treated as real it wins every landed-total comparison and puts a $0.00 line
+// in front of a human as though it were ordinary.
+func TestSelect_ZeroPricedVariationDoesNotWin(t *testing.T) {
+	m := func(s string) money.Micro {
+		v, _ := money.ParseMicro(s)
+		return v
+	}
+	vs := []*Variation{
+		{DKPartNumber: "FREE-ND", Packaging: "quote only", MinimumOrderQuantity: 1,
+			QuantityAvailable: 1000, PriceBreaks: []PriceBreak{{1, 0}}},
+		{DKPartNumber: "REAL-ND", Packaging: "Cut Tape (CT)", MinimumOrderQuantity: 1,
+			QuantityAvailable: 1000, PriceBreaks: []PriceBreak{{1, m("0.10")}}},
+	}
+	sel, err := Select(vs, 10)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sel.Chosen.Variation.DKPartNumber != "REAL-ND" {
+		t.Fatalf("a zero-priced variation must not win, got %s", sel.Chosen.Variation.DKPartNumber)
+	}
+}
+
+func TestUnitPriceAt_NegativeAndZeroQuantityBreaksAreIgnored(t *testing.T) {
+	m := func(s string) money.Micro {
+		v, _ := money.ParseMicro(s)
+		return v
+	}
+	breaks := []PriceBreak{{0, m("-0.005")}, {1, m("0.10")}}
+	got, err := UnitPriceAt(breaks, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != m("0.10") {
+		t.Fatalf("a break at qty 0 with a negative price must be ignored, got %s", got.Exact())
+	}
+}
+
+func TestUnitPriceAt_AllBreaksUnusable(t *testing.T) {
+	if _, err := UnitPriceAt([]PriceBreak{{1, 0}}, 1); err == nil {
+		t.Fatal("a ladder with no positive price must be an error, not free")
+	}
+}

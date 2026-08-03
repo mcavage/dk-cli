@@ -153,6 +153,15 @@ func toTableReport(rep *report.Report) table.Report {
 			tr.Blockers = append(tr.Blockers, table.Blocker{RefDes: refdes, MPN: lr.Line.MPN, Reason: lr.Err})
 		case report.StatusBlocked:
 			tr.Blockers = append(tr.Blockers, table.Blocker{RefDes: refdes, MPN: lr.Line.MPN, Reason: strings.Join(lr.Blockers, ", ")})
+		case report.StatusUnresolved:
+			// Without this the line has no row (no Quote), no blocker and no
+			// unmatched entry, so after a rate-limit or network stop the human
+			// reads a clean-looking table that is simply missing parts.
+			reason := lr.Err
+			if reason == "" {
+				reason = "not resolved: the run stopped before reaching this line"
+			}
+			tr.Blockers = append(tr.Blockers, table.Blocker{RefDes: refdes, MPN: lr.Line.MPN, Reason: reason})
 		}
 	}
 	for _, u := range rep.Unmatched {
@@ -239,9 +248,18 @@ func bomPrice(rc *runContext, args []string, fv *flagValues) (*output.Envelope, 
 		}
 	}
 	if limStr := fv.Str("overbuy-limit"); limStr != "" {
-		if lim, perr := money.ParseMicro(limStr); perr == nil && rep.TotalOverbuyCost > lim {
+		lim, perr := money.ParseMicro(limStr)
+		if perr != nil {
+			// Silently ignoring an unparseable limit means the caller believes a
+			// check ran when none did.
+			return output.Failure("bom.price", output.NewError(output.BadArg,
+				"--overbuy-limit "+limStr+": "+perr.Error(), false,
+				"dk bom price "+file+" --overbuy-limit 5.00")), ""
+		}
+		if rep.TotalOverbuyCost > lim {
 			env.AddWarning(output.Warning{Code: output.Partial,
-				Message: fmt.Sprintf("overbuy cost %s exceeds --overbuy-limit %s", rep.TotalOverbuyCost.String(), lim.String())})
+				Message: fmt.Sprintf("overbuy cost %s exceeds --overbuy-limit %s",
+					rep.TotalOverbuyCost.String(), lim.String())})
 		}
 	}
 	env.WithMeta(&output.Meta{RateLimit: rateLimitMeta(api.rateLimit())})
@@ -382,6 +400,11 @@ func bomPush(rc *runContext, args []string, fv *flagValues) (*output.Envelope, s
 		loaded, lerr := LoadPricedBOM(reportPath)
 		if lerr != nil {
 			return output.Failure("bom.push", output.NewError(output.BadArg, lerr.Error(), false,
+				fmt.Sprintf("dk bom price %s --out %s", file, reportPath))), ""
+		}
+		if mErr := loaded.MatchesSource(file); mErr != nil {
+			return output.Failure("bom.push", output.NewError(output.RefusedUnsafe,
+				mErr.Error(), false,
 				fmt.Sprintf("dk bom price %s --out %s", file, reportPath))), ""
 		}
 		art = loaded

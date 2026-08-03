@@ -260,3 +260,81 @@ func TestSplitRefDes(t *testing.T) {
 		}
 	}
 }
+
+// A "Populate" column is the INVERSE of a DNP column. Treating them alike skips
+// every part that should be fitted and orders every part that should not, which
+// is the worst available way to be wrong.
+func TestParse_PopulateColumnIsNotInvertedDNP(t *testing.T) {
+	b := parse(t, `mpn,populate,qty
+PART-A,Yes,3
+PART-B,No,4
+PART-C,,5
+`, Options{})
+
+	got := map[string]int{}
+	for _, l := range b.Lines {
+		got[l.MPN] = l.Qty
+	}
+	if got["PART-A"] != 3 {
+		t.Errorf("Populate=Yes must be ordered, got %v", got)
+	}
+	if _, ordered := got["PART-B"]; ordered {
+		t.Errorf("Populate=No must be skipped, got %v", got)
+	}
+	if got["PART-C"] != 5 {
+		t.Errorf("a blank Populate cell must not silently drop a part, got %v", got)
+	}
+}
+
+// A header named Total or Total Cost is money. Letting the contains-fallback
+// use it as a quantity orders 12 of a part because its line total was $12.
+func TestParse_MoneyColumnIsNotAQuantity(t *testing.T) {
+	_, err := Parse(strings.NewReader("mpn,total\nPART-A,12\n"), Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	b := parse(t, "mpn,total\nPART-A,12\n", Options{})
+	if b.Lines[0].Qty == 12 {
+		t.Fatal("a Total column must not be used as the order quantity")
+	}
+}
+
+// A blank manufacturer on one row and a populated one on another is the same
+// part. Splitting it prices each half separately, missing the quantity break
+// and paying any flat per-line fee twice.
+func TestParse_BlankManufacturerMergesWithPopulated(t *testing.T) {
+	for _, src := range []string{
+		"mpn,manufacturer,qty\nPART-B,,5\nPART-B,TI,5\n",
+		"mpn,manufacturer,qty\nPART-B,TI,5\nPART-B,,5\n",
+	} {
+		b := parse(t, src, Options{})
+		if len(b.Lines) != 1 {
+			t.Fatalf("want one merged line for %q, got %d", src, len(b.Lines))
+		}
+		if b.Lines[0].Qty != 10 {
+			t.Fatalf("want summed qty 10, got %d", b.Lines[0].Qty)
+		}
+		if b.Lines[0].Manufacturer != "TI" {
+			t.Fatalf("the known manufacturer must survive the merge, got %q", b.Lines[0].Manufacturer)
+		}
+	}
+}
+
+// A merge must sum need and on-hand too. Keeping only the first row's values
+// shows "need 4" beside "order_qty 10", which hides the real total.
+func TestParse_MergeSumsNeedAndOnHand(t *testing.T) {
+	b := parse(t, `mpn,qty,on hand,buy
+PART-A,10,4,6
+PART-A,10,6,4
+`, Options{})
+	if len(b.Lines) != 1 {
+		t.Fatalf("want 1 merged line, got %d", len(b.Lines))
+	}
+	l := b.Lines[0]
+	if l.Qty != 10 {
+		t.Fatalf("want buy 6+4=10, got %d", l.Qty)
+	}
+	if l.Need != 20 || l.OnHand != 10 {
+		t.Fatalf("want need 20 / on hand 10 summed, got %d / %d", l.Need, l.OnHand)
+	}
+}

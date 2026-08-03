@@ -90,7 +90,10 @@ var (
 		"mfr part number", "mfr. part #", "mfg part number", "part number",
 		"partnumber", "part", "dk_pn", "digikey part number", "digikeypartnumber",
 	}
-	qtyAliases = []string{"qty", "quantity", "qnty", "count", "need", "needed", "total"}
+	// "total" is deliberately absent: a header like "Total" or "Total Cost" is
+	// money, and the contains-fallback would happily order 12 of a part because
+	// its line total was $12.
+	qtyAliases = []string{"qty", "quantity", "qnty", "count", "need", "needed"}
 	// buyAliases is checked BEFORE qty when deciding what to order. In a build
 	// document, "Qty" is what the design consumes and "Buy" is what is missing.
 	buyAliases    = []string{"buy", "to buy", "order", "order qty", "purchase", "shortfall"}
@@ -100,8 +103,14 @@ var (
 		"ref", "refs",
 	}
 	mfrAliases = []string{"manufacturer", "mfr", "mfg", "manufacturer_name", "brand"}
-	dnpAliases = []string{"dnp", "do not populate", "exclude", "populate"}
-	valAliases = []string{"value", "val", "comment", "description"}
+	// "populate" is deliberately NOT here. A column named "Populate" carries the
+	// OPPOSITE polarity of a DNP column: Yes means buy it. Treating the two as
+	// the same skips every part that should be fitted and orders every part
+	// that should not, which is the worst possible way to be wrong.
+	dnpAliases = []string{"dnp", "do not populate", "do-not-populate", "exclude"}
+	// populateAliases is the inverted form, handled separately.
+	populateAliases = []string{"populate", "fitted", "fit"}
+	valAliases      = []string{"value", "val", "comment", "description"}
 )
 
 // Options controls parsing.
@@ -285,7 +294,25 @@ func Parse(r io.Reader, opts Options) (*BOM, error) {
 		}
 
 		mfr := strings.TrimSpace(get(row, idx.mfr))
-		key := strings.ToUpper(mpn) + "|" + strings.ToUpper(mfr)
+		key := mergeKey(mpn, mfr)
+		// A blank manufacturer on one row and a populated one on another is the
+		// common real case, and it is the same part. Splitting it prices each
+		// half separately, missing the quantity break and paying any flat
+		// per-line fee twice.
+		if mfr == "" {
+			if k, ok := findByMPN(byKey, mpn); ok {
+				key = k
+			}
+		} else if existing, ok := byKey[mergeKey(mpn, "")]; ok {
+			delete(byKey, mergeKey(mpn, ""))
+			existing.Manufacturer = mfr
+			byKey[key] = existing
+			for i, k := range order {
+				if k == mergeKey(mpn, "") {
+					order[i] = key
+				}
+			}
+		}
 		if existing, ok := byKey[key]; ok {
 			existing.Qty += qty
 			existing.RefDes = append(existing.RefDes, splitRefDes(refdes)...)
@@ -294,6 +321,26 @@ func Parse(r io.Reader, opts Options) (*BOM, error) {
 			// approximate 6 does not produce an exact 10.
 			if qual.NeedsReview() {
 				existing.Qualifier = qual
+			}
+			// Need and on-hand must be summed too. Keeping only the first row's
+			// values shows "need 4" beside "order_qty 10", which reads like a
+			// bug in the tool and hides the real total.
+			if need >= 0 {
+				if existing.Need < 0 {
+					existing.Need = need
+				} else {
+					existing.Need += need
+				}
+			}
+			if onHand >= 0 {
+				if existing.OnHand < 0 {
+					existing.OnHand = onHand
+				} else {
+					existing.OnHand += onHand
+				}
+			}
+			if rawQty != "" {
+				existing.RawQty += "+" + rawQty
 			}
 			continue
 		}
@@ -331,11 +378,11 @@ func Parse(r io.Reader, opts Options) (*BOM, error) {
 }
 
 type colIndex struct {
-	mpn, qty, refdes, mfr, dnp, value, buy, onhand int
+	mpn, qty, refdes, mfr, dnp, value, buy, onhand, populate int
 }
 
 func mapColumns(header []string, override map[string]string) (colIndex, error) {
-	idx := colIndex{mpn: -1, qty: -1, refdes: -1, mfr: -1, dnp: -1, value: -1, buy: -1, onhand: -1}
+	idx := colIndex{mpn: -1, qty: -1, refdes: -1, mfr: -1, dnp: -1, value: -1, buy: -1, onhand: -1, populate: -1}
 
 	norm := make([]string, len(header))
 	for i, h := range header {
@@ -370,6 +417,7 @@ func mapColumns(header []string, override map[string]string) (colIndex, error) {
 	idx.value = find(valAliases)
 	idx.buy = find(buyAliases)
 	idx.onhand = find(onHandAliases)
+	idx.populate = find(populateAliases)
 
 	// Explicit overrides win, and a name that is not in the file is an error
 	// rather than a silent fallback to guessing.
@@ -430,6 +478,15 @@ func mapColumns(header []string, override map[string]string) (colIndex, error) {
 
 // shouldSkip reports rows that are intentionally not purchased.
 func shouldSkip(row []string, idx colIndex) (string, bool) {
+	// A "Populate" column means the opposite of a "DNP" column: an explicit no
+	// is the skip. Checked first, and only an explicit negative skips, so a
+	// blank cell never silently drops a part.
+	if idx.populate >= 0 {
+		switch strings.ToLower(strings.TrimSpace(get(row, idx.populate))) {
+		case "no", "n", "false", "0", "dnp":
+			return "marked not-populated", true
+		}
+	}
 	if idx.dnp < 0 {
 		return "", false
 	}
@@ -493,4 +550,22 @@ func get(row []string, i int) string {
 		return ""
 	}
 	return row[i]
+}
+
+// mergeKey identifies a part for duplicate merging.
+func mergeKey(mpn, mfr string) string {
+	return strings.ToUpper(strings.TrimSpace(mpn)) + "|" + strings.ToUpper(strings.TrimSpace(mfr))
+}
+
+// findByMPN locates an existing line for this part number regardless of the
+// manufacturer recorded on it, so a blank manufacturer merges instead of
+// splitting the order.
+func findByMPN(byKey map[string]*Line, mpn string) (string, bool) {
+	want := strings.ToUpper(strings.TrimSpace(mpn))
+	for k := range byKey {
+		if strings.HasPrefix(k, want+"|") {
+			return k, true
+		}
+	}
+	return "", false
 }

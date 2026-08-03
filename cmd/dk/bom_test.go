@@ -370,7 +370,8 @@ func TestBomPush_UsesPinnedDigiKeyPartNumberFromArtifact(t *testing.T) {
 	bomPath := writeBOM(t, "mpn,qty,refdes\nRC0805FR-0710KL,10,R1\n")
 
 	art := &PricedBOM{
-		Version: pricedBOMVersion, Source: bomPath, GeneratedAt: time.Now().UTC(),
+		Version: pricedBOMVersion, Source: bomPath, SourceHash: hashFile(bomPath),
+		GeneratedAt:      time.Now().UTC(),
 		MerchandiseTotal: "0.32", TotalFees: "0.00", TotalOverbuyCost: "0.00",
 		Lines: []PricedLine{{
 			MPN: "RC0805FR-0710KL", RefDes: []string{"R1"}, Need: 10,
@@ -418,7 +419,7 @@ func TestBomPush_StaleArtifactWarns(t *testing.T) {
 	dir := t.TempDir()
 	bomPath := writeBOM(t, "mpn,qty\nRC0805FR-0710KL,10\n")
 	art := &PricedBOM{
-		Version: pricedBOMVersion, Source: bomPath,
+		Version: pricedBOMVersion, Source: bomPath, SourceHash: hashFile(bomPath),
 		GeneratedAt:      time.Now().UTC().Add(-72 * time.Hour),
 		MerchandiseTotal: "0.32", TotalFees: "0.00", TotalOverbuyCost: "0.00",
 		Lines: []PricedLine{{
@@ -496,5 +497,82 @@ func TestGateReasons_OverbuyLimit(t *testing.T) {
 	}
 	if got := art.GateReasons(mustMicro(t, "20.00")); len(got) != 0 {
 		t.Fatalf("under the limit must pass, got %v", got)
+	}
+}
+
+// `dk bom push new.csv --report old.json` must refuse. Without a binding
+// between the two, the BOM argument is parsed, validated, and then never used,
+// because every pushed line comes from the artifact: a human reviews one BOM
+// and the cart is filled from another.
+func TestBomPush_RefusesAnArtifactFromADifferentBOM(t *testing.T) {
+	dir := t.TempDir()
+	priced := writeBOM(t, "mpn,qty\nRC0805FR-0710KL,10\n")
+	other := writeBOM(t, "mpn,qty\nTL072CP,99\n")
+
+	art := &PricedBOM{
+		Version: pricedBOMVersion, Source: priced, SourceHash: hashFile(priced),
+		GeneratedAt: time.Now().UTC(), TotalOverbuyCost: "0.00",
+		Lines: []PricedLine{{MPN: "RC0805FR-0710KL", Need: 10,
+			DKPartNumber: "311-10.0KCRCT-ND", OrderQty: 10, Status: "ok"}},
+	}
+	artPath := filepath.Join(dir, "priced.json")
+	if err := art.Save(artPath); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd, _ := findVerb(filterGroup(registry(), "bom"), "push")
+	fs, fv := buildFlagSet(cmd)
+	if err := fs.Parse([]string{"--report", artPath, "--print-only"}); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := cmd.Run(testRC(), []string{other}, fv)
+	if env.OK {
+		t.Fatal("pushing one BOM with another BOM's priced report must be refused")
+	}
+	if env.Error.Code != output.RefusedUnsafe {
+		t.Fatalf("want REFUSED_UNSAFE, got %s", env.Error.Code)
+	}
+}
+
+// Editing the BOM after pricing it invalidates the report. The hash is what
+// closes the hand-edit hole.
+func TestBomPush_RefusesWhenTheBOMChangedAfterPricing(t *testing.T) {
+	dir := t.TempDir()
+	path := writeBOM(t, "mpn,qty\nRC0805FR-0710KL,10\n")
+
+	art := &PricedBOM{
+		Version: pricedBOMVersion, Source: path, SourceHash: hashFile(path),
+		GeneratedAt: time.Now().UTC(), TotalOverbuyCost: "0.00",
+		Lines: []PricedLine{{MPN: "RC0805FR-0710KL", Need: 10,
+			DKPartNumber: "311-10.0KCRCT-ND", OrderQty: 10, Status: "ok"}},
+	}
+	artPath := filepath.Join(dir, "priced.json")
+	if err := art.Save(artPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("mpn,qty\nRC0805FR-0710KL,10000\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd, _ := findVerb(filterGroup(registry(), "bom"), "push")
+	fs, fv := buildFlagSet(cmd)
+	if err := fs.Parse([]string{"--report", artPath, "--print-only"}); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := cmd.Run(testRC(), []string{path}, fv)
+	if env.OK {
+		t.Fatal("a BOM edited after pricing must invalidate the report")
+	}
+}
+
+// An unreadable overbuy total must refuse, not skip the check. Silently passing
+// is exactly what a hand-edited artifact wants.
+func TestGateReasons_UnreadableOverbuyTotalRefuses(t *testing.T) {
+	art := &PricedBOM{
+		Version: pricedBOMVersion, TotalOverbuyCost: "not a number",
+		Lines: []PricedLine{{MPN: "X", DKPartNumber: "311-X-ND", Status: "ok", OrderQty: 1}},
+	}
+	if got := art.GateReasons(mustMicro(t, "5.00")); len(got) != 1 {
+		t.Fatalf("want a refusal for an unreadable total, got %v", got)
 	}
 }
