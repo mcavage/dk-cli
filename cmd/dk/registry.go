@@ -172,7 +172,17 @@ func buildFlagSet(c command) (*flag.FlagSet, *flagValues) {
 	fs.Usage = func() {}
 
 	fv := newFlagValues()
+
+	// --human is global: registered here rather than declared per command, so
+	// a command added later cannot forget it and leave a person staring at
+	// JSON. --table is kept as an alias because bom price shipped with it.
+	fv.bools["human"] = fs.Bool("human", false, "render for a person instead of JSON")
+	fv.bools["table"] = fs.Bool("table", false, "alias for --human")
+
 	for _, f := range c.Flags {
+		if f.Name == "human" || f.Name == "table" {
+			continue // already registered globally
+		}
 		switch f.Kind {
 		case kindString:
 			def, _ := f.Default.(string)

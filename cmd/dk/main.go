@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/mcavage/dk-cli/internal/output"
+	"github.com/mcavage/dk-cli/internal/table"
 )
 
 func main() {
@@ -20,6 +21,15 @@ func run(argv []string, stdout, stderr io.Writer) int {
 
 	env, tableText := dispatch(argv, w)
 
+	// --human replaces the JSON on stdout rather than sitting beside it, so the
+	// "stdout is exactly one document" rule still holds; it is just a different
+	// document. The exit code is unchanged, because a human reading a table and
+	// a script checking $? must never disagree about whether it worked.
+	if tableText == "" && wantsHuman(argv) {
+		fmt.Fprint(stdout, renderHuman(env, table.ColorEnabled(stdout)))
+		return output.ExitCode(env)
+	}
+
 	// bom.price --table is the one documented exception to "stdout is
 	// exactly one JSON document" (docs/PLAN.md D6): the exit code still
 	// comes from the envelope dispatch built, but the human review table
@@ -30,4 +40,24 @@ func run(argv []string, stdout, stderr io.Writer) int {
 	}
 
 	return w.WriteEnvelope(env)
+}
+
+// wantsHuman scans argv directly.
+//
+// The flag is parsed per command, but the renderer runs after dispatch has
+// already returned an envelope, including for the failures that never reached a
+// command (unknown subcommand, bad flag). Those are exactly the moments a
+// person most needs readable output, so the check cannot depend on parsing
+// having succeeded.
+func wantsHuman(argv []string) bool {
+	for _, a := range argv {
+		switch a {
+		case "--human", "-human", "--table", "-table",
+			"--human=true", "--table=true":
+			return true
+		case "--":
+			return false
+		}
+	}
+	return false
 }

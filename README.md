@@ -16,6 +16,11 @@ Set `DK_CLIENT_ID` and `DK_CLIENT_SECRET` for authentication. Any value starting
 
 Run `dk schema` to output machine-readable CLI interface documentation, flag definitions, and example payloads.
 
+Add `--human` to any command for a readable table instead of JSON. JSON stays
+the default everywhere, including for errors, so an agent parsing stdout is
+never surprised by a format that changed because it happened to run in a
+terminal.
+
 `dk` cannot place orders. The binary contains no ordering client and holds product-data credentials only.
 
 ## Installation
