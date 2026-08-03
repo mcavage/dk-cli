@@ -1,0 +1,43 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # `git describe` needs tags for the version stamp
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      # Never publish a build that would not pass CI. A tag is the one moment
+      # where skipping the gate is most tempting and most expensive.
+      - run: make check
+      - run: make dist
+
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            dist/dk_* dist/checksums.txt
+
+      # The Homebrew formula points at release assets by URL and SHA256, so it
+      # can only be written after the assets exist. Requires a HOMEBREW_TAP_TOKEN
+      # secret with write access to the tap repo; skipped when absent so a
+      # release never fails because the tap is not set up yet.
+      - name: update homebrew tap
+        if: ${{ env.TAP_TOKEN != '' }}
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAP_REPO: mcavage/homebrew-tap
+        run: ./scripts/update-tap.sh "${GITHUB_REF_NAME}"

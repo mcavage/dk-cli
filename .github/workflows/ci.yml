@@ -1,0 +1,18 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      # gofmt, vet and the full suite. No credentials: every test runs offline,
+      # since the one live dependency (the handoff endpoint) is exercised
+      # through httptest rather than the network.
+      - run: make check

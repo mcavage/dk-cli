@@ -20,21 +20,34 @@ Run `dk schema` to output machine-readable CLI interface documentation, flag def
 
 ## Installation
 
-### Go Install
-```bash
-go install github.com/mcavage/dk-cli/cmd/dk@latest
+### From source (works today)
+
+```
+git clone https://github.com/mcavage/dk-cli && cd dk-cli && make install
 ```
 
-### Homebrew
-```bash
-brew install mcavage/tap/dk
-```
+### Released binaries
 
-### Curl Script
-```bash
+Everything below needs a tagged release to exist first. Until `v0.1.0` is
+pushed, these commands will fail, and that is stated here rather than
+discovered:
+
+```
+go install github.com/mcavage/dk-cli/cmd/dk@latest      # needs the repo pushed
+brew install mcavage/tap/dk                             # needs the tap created
 curl -fsSL https://raw.githubusercontent.com/mcavage/dk-cli/main/install.sh | sh
 ```
-Installs the prebuilt static binary into `~/.local/bin`.
+
+`install.sh` downloads the right binary for your OS and architecture into
+`~/.local/bin`, verifies its SHA256 against the release checksums, and refuses
+to install anything it cannot verify. It needs no root.
+
+Release machinery is in the repo and ready: `make dist` cross-compiles all four
+platforms with checksums, `.github/workflows/release.yml` publishes them on a
+`v*` tag, and `scripts/update-tap.sh` regenerates the Homebrew formula pinned to
+those checksums. The tap itself is a separate `homebrew-tap` repo that has to be
+created once, with a `HOMEBREW_TAP_TOKEN` secret; until then the release job
+skips that step rather than failing.
 
 ## DigiKey Credentials
 

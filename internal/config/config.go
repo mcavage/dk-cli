@@ -21,6 +21,7 @@ import (
 const (
 	EnvClientID     = "DK_CLIENT_ID"
 	EnvClientSecret = "DK_CLIENT_SECRET"
+	EnvAccountID    = "DK_ACCOUNT_ID"
 	EnvSite         = "DK_LOCALE_SITE"
 	EnvCurrency     = "DK_LOCALE_CURRENCY"
 	EnvLanguage     = "DK_LOCALE_LANGUAGE"
@@ -35,6 +36,12 @@ const (
 
 // Config is everything the CLI needs that is not a per-command flag.
 type Config struct {
+	// AccountID is the DigiKey account id. Optional for everything except order
+	// history, where 2-legged OAuth requires it: without it DigiKey cannot tell
+	// whose sales orders to return, and the failure reads like an auth problem
+	// rather than a missing header.
+	AccountID string
+
 	Site     string
 	Currency string
 	Language string
@@ -57,9 +64,10 @@ var ErrMissingCredential = errors.New("config: no DigiKey credentials found")
 // auth (BOM parsing, schema, the handoff) work with no credentials at all.
 func Load() (*Config, error) {
 	c := &Config{
-		Site:     firstNonEmpty(os.Getenv(EnvSite), "US"),
-		Currency: firstNonEmpty(os.Getenv(EnvCurrency), "USD"),
-		Language: firstNonEmpty(os.Getenv(EnvLanguage), "en"),
+		AccountID: strings.TrimSpace(os.Getenv(EnvAccountID)),
+		Site:      firstNonEmpty(os.Getenv(EnvSite), "US"),
+		Currency:  firstNonEmpty(os.Getenv(EnvCurrency), "USD"),
+		Language:  firstNonEmpty(os.Getenv(EnvLanguage), "en"),
 	}
 
 	var err error

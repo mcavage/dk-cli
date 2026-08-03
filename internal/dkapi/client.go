@@ -37,11 +37,12 @@ const (
 
 // Client talks to Product Information v4.
 type Client struct {
-	http     *http.Client
-	cfg      *config.Config
-	tokens   *TokenSource
-	host     string
-	clientID string
+	http      *http.Client
+	cfg       *config.Config
+	tokens    *TokenSource
+	host      string
+	clientID  string
+	accountID string
 
 	// LastRateLimit holds the quota headers from the most recent response.
 	LastRateLimit RateLimit
@@ -89,10 +90,11 @@ func New(cfg *config.Config, opts Options) (*Client, error) {
 	httpClient := &http.Client{Timeout: timeout, Transport: transport}
 
 	return &Client{
-		http:     httpClient,
-		cfg:      cfg,
-		clientID: id,
-		host:     host,
+		http:      httpClient,
+		cfg:       cfg,
+		clientID:  id,
+		accountID: cfg.AccountID,
+		host:      host,
 		tokens: &TokenSource{
 			HTTP:      httpClient,
 			Host:      host,
@@ -177,6 +179,11 @@ func (c *Client) do(ctx context.Context, method, path string, body any) ([]byte,
 	req.Header.Set("X-DIGIKEY-Locale-Site", c.cfg.Site)
 	req.Header.Set("X-DIGIKEY-Locale-Currency", c.cfg.Currency)
 	req.Header.Set("X-DIGIKEY-Locale-Language", c.cfg.Language)
+	if c.accountID != "" {
+		// Optional for 3-legged, REQUIRED for 2-legged order history. Sending it
+		// on every call is harmless and avoids a per-endpoint special case.
+		req.Header.Set("X-DIGIKEY-Account-Id", c.accountID)
+	}
 	req.Header.Set("Accept", "application/json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
