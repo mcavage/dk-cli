@@ -45,6 +45,8 @@ func renderHuman(env *output.Envelope, color bool) string {
 		b.WriteString(renderPartDetail(env.Data))
 	case "part.price":
 		b.WriteString(renderKV(env.Data))
+	case "bom.format":
+		b.WriteString(renderBOMFormat(env.Data))
 	case "bom.check":
 		b.WriteString(renderBOMCheck(env.Data))
 	case "orders.list":
@@ -483,4 +485,103 @@ func joinAny(v any) string {
 		parts = append(parts, str(i))
 	}
 	return strings.Join(parts, ",")
+}
+
+func renderBOMFormat(data any) string {
+	m := asMap(data)
+	var b strings.Builder
+
+	fmt.Fprintf(&b, "BOM input format\n\n  Simplest file that works:  %s\n\n",
+		str(m["canonical_header"]))
+
+	if t := str(m["template"]); t != "" {
+		b.WriteString("  Starter file (dk bom format --template > bom.csv):\n\n")
+		for _, line := range strings.Split(strings.TrimRight(t, "\n"), "\n") {
+			fmt.Fprintf(&b, "    %s\n", line)
+		}
+		b.WriteString("\n")
+	}
+
+	cols := []table.Column{
+		{Header: "COLUMN", MaxWidth: 14},
+		{Header: "", MaxWidth: 9},
+		{Header: "ACCEPTED HEADERS", MaxWidth: 52},
+	}
+	var rows [][]string
+	for _, c := range asSlice(m["columns"]) {
+		req := "optional"
+		if v, _ := c["required"].(bool); v {
+			req = "REQUIRED"
+		}
+		rows = append(rows, []string{str(c["field"]), req, joinAny(c["accepted_headers"])})
+	}
+	b.WriteString("COLUMNS\n" + table.Render(cols, rows) + "\n")
+
+	b.WriteString("\nWHAT EACH COLUMN IS FOR\n\n")
+	for _, c := range asSlice(m["columns"]) {
+		fmt.Fprintf(&b, "  %s\n", str(c["field"]))
+		b.WriteString(wrapIndent(str(c["purpose"]), 4, 74))
+	}
+
+	fmt.Fprintf(&b, "\nWHICH COLUMN IS ORDERED\n\n%s\n",
+		wrapIndent(str(m["quantity_column_rule"]), 2, 76))
+
+	b.WriteString("\nQUANTITY FORMS\n\n")
+	for _, q := range asSlice(m["quantity_forms"]) {
+		flag := ""
+		if v, _ := q["flagged_for_review"].(bool); v {
+			flag = "  [flagged]"
+		}
+		// Wrap the explanation and hang the continuation under the example.
+		text := str(q["means"]) + flag
+		lines := strings.Split(strings.TrimRight(wrapIndent(text, 11, 78), "\n"), "\n")
+		fmt.Fprintf(&b, "  %-8s %s\n", str(q["example"]), strings.TrimSpace(lines[0]))
+		for _, cont := range lines[1:] {
+			fmt.Fprintf(&b, "%s\n", cont)
+		}
+	}
+
+	b.WriteString("\nROWS NOT ORDERED\n\n")
+	rowsNotOrdered, _ := m["rows_not_ordered"].([]any)
+	for _, s := range rowsNotOrdered {
+		fmt.Fprintf(&b, "  - %v\n", s)
+	}
+
+	fmt.Fprintf(&b, "\nDUPLICATES\n\n%s\n", wrapIndent(str(m["duplicate_handling"]), 2, 76))
+	fmt.Fprintf(&b, "\nREMAPPING\n\n%s\n", wrapIndent(str(m["column_remapping"]), 2, 76))
+
+	b.WriteString("\nALSO ACCEPTED\n\n")
+	formats, _ := m["accepted_file_formats"].([]any)
+	for _, f := range formats {
+		fmt.Fprintf(&b, "  - %v\n", f)
+	}
+
+	b.WriteString("\nNOTES\n\n")
+	notes, _ := m["notes"].([]any)
+	for _, n := range notes {
+		b.WriteString(wrapIndent(fmt.Sprint(n), 2, 76))
+	}
+	return b.String()
+}
+
+// wrapIndent hard-wraps prose so the format doc stays inside a terminal.
+func wrapIndent(s string, indent, width int) string {
+	pad := strings.Repeat(" ", indent)
+	var b strings.Builder
+	line := pad
+	for _, word := range strings.Fields(s) {
+		if len(line)+len(word)+1 > width && strings.TrimSpace(line) != "" {
+			b.WriteString(line + "\n")
+			line = pad
+		}
+		if strings.TrimSpace(line) == "" {
+			line += word
+			continue
+		}
+		line += " " + word
+	}
+	if strings.TrimSpace(line) != "" {
+		b.WriteString(line + "\n")
+	}
+	return b.String()
 }

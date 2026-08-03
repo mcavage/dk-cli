@@ -596,15 +596,27 @@ func bomCheck(rc *runContext, args []string, fv *flagValues) (*output.Envelope, 
 		}
 	}
 
+	// Always emit arrays. An absent field and an empty one state the same fact,
+	// and a consumer doing len() on the absent case crashes. Warnings already
+	// follow this rule, so payload arrays should too.
+	skips := b.Skips
+	if skips == nil {
+		skips = []bom.Skip{}
+	}
+	notes := b.Notes
+	if notes == nil {
+		notes = []string{}
+	}
+
 	env := output.Success("bom.check", map[string]any{
 		"source":          b.Source,
 		"lines":           b.Lines,
 		"line_count":      len(b.Lines),
 		"total_units":     b.TotalUnits(),
 		"quantity_column": qtyColumn,
-		"skipped":         b.Skips,
+		"skipped":         skips,
 		"needs_review":    needsReview,
-		"notes":           b.Notes,
+		"notes":           notes,
 	})
 	// One summary warning, not one per skip. The skipped rows are already in
 	// the payload with their reasons, so repeating each as a warning is noise
@@ -625,4 +637,16 @@ func bomCheck(rc *runContext, args []string, fv *flagValues) (*output.Envelope, 
 				"concrete number; check them before pricing", len(needsReview))))
 	}
 	return env, ""
+}
+
+// bomFormat documents the input contract, for a person or an agent.
+func bomFormat(rc *runContext, _ []string, fv *flagValues) (*output.Envelope, string) {
+	spec := bom.Describe()
+
+	// --template emits only the CSV, so `dk bom format --template > bom.csv`
+	// produces a working file with no editing.
+	if fv.Bool("template") {
+		return output.Success("bom.format", map[string]any{"template": spec.Template}), spec.Template
+	}
+	return output.Success("bom.format", spec), ""
 }

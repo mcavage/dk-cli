@@ -16,6 +16,17 @@ Set `DK_CLIENT_ID` and `DK_CLIENT_SECRET` for authentication. Any value starting
 
 Run `dk schema` to output machine-readable CLI interface documentation, flag definitions, and example payloads.
 
+The BOM input format is documented by the tool itself, so it cannot drift from
+what the parser accepts:
+
+```
+dk bom format --human            # columns, quantity rules, what gets skipped
+dk bom format --template > bom.csv   # a starter file that is guaranteed to parse
+```
+
+CSV is the machine contract: `mpn,qty,refdes`. A markdown pipe table is also
+accepted, for a planning document that carries prose alongside its parts table.
+
 Add `--human` to any command for a readable table instead of JSON. JSON stays
 the default everywhere, including for errors, so an agent parsing stdout is
 never surprised by a format that changed because it happened to run in a

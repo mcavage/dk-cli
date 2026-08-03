@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mcavage/dk-cli/internal/bom"
 	"github.com/mcavage/dk-cli/internal/config"
 	"github.com/mcavage/dk-cli/internal/dkapi"
 	"github.com/mcavage/dk-cli/internal/handoff"
@@ -635,5 +636,77 @@ func TestBomCheck_SkipsAreOneSummaryWarning(t *testing.T) {
 	}
 	if len(env["data"].(map[string]any)["skipped"].([]any)) != 3 {
 		t.Fatal("the individual reasons must still be in the payload")
+	}
+}
+
+// The whole point of documenting the format is that someone can follow it.
+// A template that does not parse would send them to fix a correct file.
+func TestBomFormat_TemplateRoundTrips(t *testing.T) {
+	t.Setenv("DK_CLIENT_ID", "")
+	t.Setenv("DK_CLIENT_SECRET", "")
+
+	r := runCapture(t, "bom", "format", "--template")
+	if r.Exit != output.ExitOK {
+		t.Fatalf("exit = %d", r.Exit)
+	}
+	// --template writes the raw CSV, not an envelope, so it can be redirected
+	// straight into a file.
+	if strings.HasPrefix(strings.TrimSpace(r.Stdout), "{") {
+		t.Fatalf("--template must emit CSV, got:\n%s", r.Stdout)
+	}
+
+	path := filepath.Join(t.TempDir(), "bom.csv")
+	if err := os.WriteFile(path, []byte(r.Stdout), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	check := runCapture(t, "bom", "check", path)
+	if check.Exit != output.ExitOK {
+		t.Fatalf("the emitted template must parse cleanly, exit %d: %s", check.Exit, check.Stdout)
+	}
+	env := check.envelope(t)
+	data := env["data"].(map[string]any)
+	if n := data["line_count"].(float64); n != 4 {
+		t.Fatalf("want 4 lines from the template, got %v", n)
+	}
+	if skips := data["skipped"].([]any); len(skips) != 0 {
+		t.Fatalf("the template must produce no skips, got %v", skips)
+	}
+}
+
+func TestBomFormat_NeedsNoCredentialsAndIsMachineReadable(t *testing.T) {
+	t.Setenv("DK_CLIENT_ID", "")
+	t.Setenv("DK_CLIENT_SECRET", "")
+
+	r := runCapture(t, "bom", "format")
+	if r.Exit != output.ExitOK {
+		t.Fatalf("exit = %d", r.Exit)
+	}
+	data := r.envelope(t)["data"].(map[string]any)
+	for _, k := range []string{"canonical_header", "columns", "quantity_forms",
+		"rows_not_ordered", "template", "quantity_column_rule"} {
+		if _, ok := data[k]; !ok {
+			t.Errorf("the machine-readable spec is missing %q", k)
+		}
+	}
+	// mpn must be the one required column, so an agent knows the minimum.
+	var required []string
+	for _, c := range data["columns"].([]any) {
+		m := c.(map[string]any)
+		if v, _ := m["required"].(bool); v {
+			required = append(required, m["field"].(string))
+		}
+	}
+	if len(required) != 1 || required[0] != "mpn" {
+		t.Fatalf("want mpn as the only required column, got %v", required)
+	}
+}
+
+// Format help that does not fit a terminal is format help nobody reads.
+func TestBomFormat_HumanFitsEightyColumns(t *testing.T) {
+	env := output.Success("bom.format", bom.Describe())
+	for _, line := range strings.Split(renderHuman(env, false), "\n") {
+		if len([]rune(line)) > 80 {
+			t.Errorf("%d-column line:\n%s", len([]rune(line)), line)
+		}
 	}
 }

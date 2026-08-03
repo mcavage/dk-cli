@@ -284,6 +284,16 @@ func registry() []command {
 			Run:       partPrice,
 		},
 		{
+			Group: "bom", Verb: "format",
+			Summary: "Print the BOM input format: required columns, accepted headers, quantity rules.",
+			Flags: []flagSpec{
+				{Name: "template", Kind: kindBool, Default: false, Usage: "emit only a starter CSV, for redirecting to a file"},
+			},
+			NeedsAuth: false,
+			Example:   "dk bom format --human",
+			Run:       bomFormat,
+		},
+		{
 			Group: "bom", Verb: "check",
 			Summary: "Parse a BOM and show exactly what was read. No credentials, no network.",
 			Args:    []argSpec{{Name: "file", Usage: "path to a BOM (CSV, KiCad export, or markdown table)"}},
