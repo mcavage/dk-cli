@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/mcavage/dk-cli/internal/dkapi"
 	"github.com/mcavage/dk-cli/internal/output"
@@ -91,7 +92,33 @@ func partGet(rc *runContext, args []string, fv *flagValues) (*output.Envelope, s
 		return output.Failure("part.get", classifyDKErr(err)), ""
 	}
 
+	// Fit assertions. The expensive sourcing mistake is not overpaying, it is a
+	// part that does not physically fit: a 3.5mm terminal block for a 2.54mm
+	// board, or 0805 where through hole was needed. Both are plausible-looking
+	// correct-price parts, so the check has to be explicit and has to fail hard.
+	reqs, rerr := parseRequirements(fv.Str("require"))
+	if rerr != nil {
+		return output.Failure("part.get", output.NewError(output.BadArg, rerr.Error(), false,
+			"dk part get "+mpn+" --require mounting_type=through hole,pitch=2.54mm")), ""
+	}
+	if len(reqs) > 0 {
+		if failures := part.CheckRequirements(reqs); len(failures) > 0 {
+			return output.Failure("part.get", output.NewError(output.NoMatch,
+				fmt.Sprintf("%s does not meet %d requirement(s)", mpn, len(failures)), false,
+				"dk part get "+mpn+"   # inspect the fit block and adjust the requirement").
+				WithDetails(map[string]any{
+					"failures": failures,
+					"fit":      part.Fit,
+				})), ""
+		}
+	}
+
 	env := output.Success("part.get", part)
+	if part.Fit.Empty() {
+		env.AddWarning(output.Warning{Code: output.Code("NO_FIT_DATA"),
+			Message: "DigiKey returned no fit attributes for this part, so mounting type, " +
+				"pitch and package could not be checked"})
+	}
 	if blockers := part.Blockers(); len(blockers) > 0 {
 		env.AddWarning(output.Warning{Code: output.NotOrderable,
 			Message: "part has lifecycle blockers: " + joinComma(blockers)})
@@ -219,4 +246,34 @@ func joinComma(ss []string) string {
 		out += s
 	}
 	return out
+}
+
+// parseRequirements reads --require "mounting_type=through hole,pitch=2.54mm".
+//
+// Commas separate requirements and the first '=' separates key from value, so a
+// value may contain '=' but not ','. DigiKey values do not contain commas in the
+// fields that matter here (pitch, mounting, package), and requiring shell
+// quoting for every assertion would make the flag annoying enough to skip.
+func parseRequirements(spec string) ([]dkapi.Requirement, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return nil, nil
+	}
+	var out []dkapi.Requirement
+	for _, part := range strings.Split(spec, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		k, v, ok := strings.Cut(part, "=")
+		if !ok {
+			return nil, fmt.Errorf("--require %q: want key=value", part)
+		}
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if k == "" || v == "" {
+			return nil, fmt.Errorf("--require %q: both key and value are required", part)
+		}
+		out = append(out, dkapi.Requirement{Key: k, Value: v})
+	}
+	return out, nil
 }

@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -255,22 +253,29 @@ func bomPrice(rc *runContext, args []string, fv *flagValues) (*output.Envelope, 
 	return env, ""
 }
 
-// lockFile is the JSON shape `dk bom resolve` writes and the shape a future
-// `bom price --lock` would read: the deterministic result of BOM parsing
-// alone (merges, skip reasons, quantity qualifiers), with no DigiKey call
-// in it. See docs/dk-contract.md hard requirement 4: bom resolve works with
-// no credentials.
-type lockFile struct {
-	Source string     `json:"source"`
-	Lines  []bom.Line `json:"lines"`
-	Skips  []bom.Skip `json:"skips,omitempty"`
-	Notes  []string   `json:"notes,omitempty"`
-}
+// The lock file format is PricedBOM (see artifact.go). It replaced an earlier
+// shape that stored only the parsed BOM, which was useless to `bom push`
+// because it held no DigiKey part numbers.
 
+// bomResolve pins every line to a specific DigiKey part number and packaging
+// variation, then writes the artifact `bom push --report` consumes.
+//
+// This has to hit the API. A hand-written BOM line says "4.7k" or "DIP-16
+// socket", and even a real MPN maps to several DigiKey part numbers with
+// different MOQs, so nothing about a line is resolved until DigiKey has been
+// asked. A version of this command that only reformatted the parse would be
+// named for work it did not do, and would hand push a file with no part
+// numbers in it.
 func bomResolve(rc *runContext, args []string, fv *flagValues) (*output.Envelope, string) {
 	file := args[0]
 
-	b, err := bom.ParseFile(file, bom.Options{DefaultQty: 1})
+	colMap, cerr := parseColumns(fv.Str("columns"))
+	if cerr != nil {
+		return output.Failure("bom.resolve", output.NewError(output.BadArg, cerr.Error(), false,
+			"dk bom resolve "+file+" --columns mpn=MPN,qty=Qty")), ""
+	}
+
+	b, err := bom.ParseFile(file, bom.Options{ColumnMap: colMap, DefaultQty: 1})
 	if err != nil {
 		return output.Failure("bom.resolve", output.NewError(output.BOMInvalid, err.Error(), false,
 			"check the file path and header names")), ""
@@ -281,24 +286,55 @@ func bomResolve(rc *runContext, args []string, fv *flagValues) (*output.Envelope
 		out = "bom.lock"
 	}
 
-	lf := lockFile{Source: b.Source, Lines: b.Lines, Skips: b.Skips, Notes: b.Notes}
-	data, err := json.MarshalIndent(lf, "", "  ")
-	if err != nil {
-		return output.Failure("bom.resolve", output.NewError(output.Internal, err.Error(), false, "")), ""
+	cfg, ferr := loadConfig()
+	if ferr != nil {
+		return output.Failure("bom.resolve", ferr), ""
 	}
-	if err := os.WriteFile(out, data, 0o644); err != nil {
+	api, aerr := rc.apiSource(cfg)
+	if aerr != nil {
+		return output.Failure("bom.resolve", aerr), ""
+	}
+
+	rep, buildErr := report.Build(context.Background(), b, api.src)
+	if buildErr != nil && rep == nil {
+		return output.Failure("bom.resolve", classifyDKErr(buildErr)), ""
+	}
+
+	art := NewPricedBOM(file, rep)
+	if err := art.Save(out); err != nil {
 		return output.Failure("bom.resolve", output.NewError(output.Internal,
-			fmt.Sprintf("writing %s: %v", out, err), false, "")), ""
+			fmt.Sprintf("writing %s: %v", out, err), false, "check the directory is writable")), ""
+	}
+
+	pinned, unresolved := 0, []string{}
+	for _, l := range art.Lines {
+		if l.DKPartNumber != "" {
+			pinned++
+		} else {
+			unresolved = append(unresolved, l.MPN)
+		}
 	}
 
 	env := output.Success("bom.resolve", map[string]any{
-		"path":  out,
-		"lines": len(b.Lines),
-		"skips": len(b.Skips),
+		"path":       out,
+		"lines":      len(art.Lines),
+		"pinned":     pinned,
+		"unresolved": unresolved,
+		"skips":      len(b.Skips),
 	})
 	for _, w := range bomWarnings(b) {
 		env.AddWarning(w)
 	}
+	if len(unresolved) > 0 {
+		// Partial, not failure: a lock file with most lines pinned is useful,
+		// and the caller needs to see exactly which labels a human must map by
+		// hand. "4.7k" is never going to resolve itself.
+		env.AddWarning(output.WarnPartial(fmt.Sprintf(
+			"%d line(s) could not be pinned to a DigiKey part number: %s. "+
+				"Replace the label with a real MPN or DigiKey part number.",
+			len(unresolved), joinComma(unresolved))))
+	}
+	env.WithMeta(&output.Meta{RateLimit: rateLimitMeta(api.rateLimit())})
 	return env, ""
 }
 

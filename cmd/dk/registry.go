@@ -254,6 +254,8 @@ func registry() []command {
 		},
 		{
 			Group: "part", Verb: "get",
+			Flags: []flagSpec{{Name: "require", Kind: kindString, Default: "",
+				Usage: "assert fit attributes, e.g. mounting_type=through hole,pitch=2.54mm"}},
 			Summary:   "Fetch real-time details for one part by DigiKey or manufacturer part number.",
 			Args:      []argSpec{{Name: "mpn", Usage: "DigiKey or manufacturer part number"}},
 			NeedsAuth: true,
@@ -288,10 +290,12 @@ func registry() []command {
 		},
 		{
 			Group: "bom", Verb: "resolve",
-			Summary: "Parse and normalize a BOM into a deterministic bom.lock (merges duplicates, records skips).",
-			Args:    []argSpec{{Name: "file", Usage: "path to a BOM CSV (or KiCad export)"}},
+			NeedsAuth: true,
+			Summary:   "Parse and normalize a BOM into a deterministic bom.lock (merges duplicates, records skips).",
+			Args:      []argSpec{{Name: "file", Usage: "path to a BOM CSV (or KiCad export)"}},
 			Flags: []flagSpec{
-				{Name: "o", Kind: kindString, Default: "bom.lock", Usage: "output path for the lock file"},
+				{Name: "o", Kind: kindString, Default: "bom.lock", Usage: "output path for the pinned artifact"},
+				{Name: "columns", Kind: kindString, Default: "", Usage: "column remap, e.g. mpn=MPN,qty=Buy"},
 			},
 			Example: "dk bom resolve bom.csv -o bom.lock",
 			Run:     bomResolve,

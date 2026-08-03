@@ -178,20 +178,100 @@ func TestBomPrice_UnmatchedIsPartial(t *testing.T) {
 	}
 }
 
-func TestBomResolve_NoCredentialsNeeded(t *testing.T) {
+// bom resolve needs credentials, and that is the point of the command.
+//
+// Nothing about a BOM line is resolved until DigiKey has been asked: a
+// hand-written line says "4.7k", and even a real MPN maps to several DigiKey
+// part numbers with different MOQs. An earlier version reformatted the parse
+// and called that resolution, which produced a lock file with no part numbers
+// in it and left `bom push` nothing to push.
+func TestBomResolve_RequiresCredentials(t *testing.T) {
 	t.Setenv("DK_CLIENT_ID", "")
 	t.Setenv("DK_CLIENT_SECRET", "")
+	path := writeBOM(t, "mpn,qty\nRC0805FR-0710KL,10\n")
 
-	path := writeBOM(t, "mpn,qty,refdes\nRC0805FR-0710KL,10,R1\n")
-	lockPath := filepath.Join(t.TempDir(), "bom.lock")
-
-	r := runCapture(t, "bom", "resolve", path, "-o", lockPath)
-	env := r.envelope(t)
-	if ok, _ := env["ok"].(bool); !ok {
-		t.Fatalf("bom resolve should work with no credentials: %v", env)
+	r := runCapture(t, "bom", "resolve", path, "-o", filepath.Join(t.TempDir(), "bom.lock"))
+	if r.Exit != output.ExitCredential {
+		t.Fatalf("exit = %d, want %d", r.Exit, output.ExitCredential)
 	}
-	if _, err := os.Stat(lockPath); err != nil {
-		t.Fatalf("lock file not written: %v", err)
+}
+
+// Resolving pins the winning DigiKey part number and packaging, which is what
+// makes the artifact pushable.
+func TestBomResolve_PinsDigiKeyPartNumber(t *testing.T) {
+	path := writeBOM(t, "mpn,qty,refdes\nRC0805FR-0710KL,10,R1\n")
+	lock := filepath.Join(t.TempDir(), "bom.lock")
+
+	cmd, _ := findVerb(filterGroup(registry(), "bom"), "resolve")
+	fs, fv := buildFlagSet(cmd)
+	if err := fs.Parse([]string{"-o", lock}); err != nil {
+		t.Fatal(err)
+	}
+	rc := testRC()
+	rc.newAPISource = fakeAPISource(rc0805(t))
+	env, _ := cmd.Run(rc, []string{path}, fv)
+	if !env.OK {
+		t.Fatalf("resolve failed: %+v", env.Error)
+	}
+
+	art, err := LoadPricedBOM(lock)
+	if err != nil {
+		t.Fatalf("the lock file must load as a priced artifact: %v", err)
+	}
+	if len(art.Lines) != 1 {
+		t.Fatalf("want 1 line, got %d", len(art.Lines))
+	}
+	// Cut tape wins on landed total after MOQ forcing; the reel's MOQ is 5000.
+	if got := art.Lines[0].DKPartNumber; got != "311-10.0KCRCT-ND" {
+		t.Fatalf("want the cut-tape part pinned, got %q", got)
+	}
+	if art.Lines[0].OrderQty != 10 {
+		t.Fatalf("want order qty 10, got %d", art.Lines[0].OrderQty)
+	}
+}
+
+// A label like "4.7k" will never resolve itself. That is partial, not fatal:
+// the rest of the lock is still useful, and the caller needs to see exactly
+// which labels a human must map by hand.
+func TestBomResolve_UnresolvableLabelIsPartialNotFatal(t *testing.T) {
+	path := writeBOM(t, "mpn,qty\nRC0805FR-0710KL,10\n4.7k,6\n")
+	lock := filepath.Join(t.TempDir(), "bom.lock")
+
+	cmd, _ := findVerb(filterGroup(registry(), "bom"), "resolve")
+	fs, fv := buildFlagSet(cmd)
+	if err := fs.Parse([]string{"-o", lock}); err != nil {
+		t.Fatal(err)
+	}
+	rc := testRC()
+	rc.newAPISource = fakeAPISource(rc0805(t))
+	env, _ := cmd.Run(rc, []string{path}, fv)
+
+	if !env.OK {
+		t.Fatalf("an unresolvable label must not fail the whole run: %+v", env.Error)
+	}
+	if output.ExitCode(env) != output.ExitPartial {
+		t.Fatalf("exit = %d, want %d (partial)", output.ExitCode(env), output.ExitPartial)
+	}
+	art, err := LoadPricedBOM(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The unresolved line must be present and pinless, so the gate refuses it
+	// later rather than it silently vanishing from the order.
+	var found bool
+	for _, l := range art.Lines {
+		if l.MPN == "4.7k" {
+			found = true
+			if l.DKPartNumber != "" {
+				t.Fatalf("a label that did not resolve must not be pinned, got %q", l.DKPartNumber)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("the unresolved line must stay in the artifact, not disappear")
+	}
+	if reasons := art.GateReasons(-1); len(reasons) == 0 {
+		t.Fatal("an unpinned line must make the gate refuse")
 	}
 }
 

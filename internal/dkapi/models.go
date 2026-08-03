@@ -105,6 +105,9 @@ type Part struct {
 	DatasheetURL  string `json:"datasheet_url,omitempty"`
 	ProductURL    string `json:"product_url,omitempty"`
 
+	// Fit is promoted into the default view on purpose: see internal/dkapi/fit.go.
+	Fit Fit `json:"fit"`
+
 	Variations []*pricing.Variation `json:"-"`
 }
 
@@ -172,6 +175,7 @@ func toPart(w wireProduct) *Part {
 		RoHS:                w.Classifications.RohsStatus,
 		DatasheetURL:        w.DatasheetURL,
 		ProductURL:          w.ProductURL,
+		Fit:                 extractFit(w.Parameters),
 	}
 	for _, wv := range w.ProductVariations {
 		v := &pricing.Variation{
