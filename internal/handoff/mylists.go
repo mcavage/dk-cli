@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	neturl "net/url"
+	"strings"
 )
 
 // myListsPath is the verified zero-auth endpoint from /tmp/dk-contract.md. It
@@ -120,18 +122,45 @@ func (c *Client) MyLists(ctx context.Context, listName, tags string, lines []Lin
 // sends and the {"singleUseUrl":"..."} object their documentation describes.
 // A response that is neither is a clear error naming what was received,
 // rather than a nil URL the caller might open by mistake.
+// allowedHandoffHosts is the only place a handoff URL may point.
+//
+// The URL is handed to a browser via config.OpenBrowser, so accepting whatever
+// string comes back means "a third party names a URL and we launch it". This
+// endpoint is unversioned and forum-documented, so an open redirect or content
+// injection there must not escalate locally. On Windows the opener is rundll32
+// FileProtocolHandler, which acts on schemes well beyond https.
+var allowedHandoffHosts = map[string]bool{
+	"www.digikey.com": true,
+	"digikey.com":     true,
+}
+
+func validateHandoffURL(raw string) (string, error) {
+	u, err := neturl.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", fmt.Errorf("%w: unparseable URL %q", ErrBadResponse, truncate([]byte(raw), 80))
+	}
+	if u.Scheme != "https" {
+		return "", fmt.Errorf("%w: refusing a non-https handoff URL (scheme %q)", ErrBadResponse, u.Scheme)
+	}
+	if !allowedHandoffHosts[strings.ToLower(u.Hostname())] {
+		return "", fmt.Errorf("%w: refusing a handoff URL pointing at %q, not DigiKey",
+			ErrBadResponse, u.Hostname())
+	}
+	return u.String(), nil
+}
+
 func parseMyListsResponse(raw []byte) (string, error) {
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
 		if s == "" {
 			return "", fmt.Errorf("%w: bare string response was empty", ErrBadResponse)
 		}
-		return s, nil
+		return validateHandoffURL(s)
 	}
 
 	var obj myListsResponseObject
 	if err := json.Unmarshal(raw, &obj); err == nil && obj.SingleUseURL != "" {
-		return obj.SingleUseURL, nil
+		return validateHandoffURL(obj.SingleUseURL)
 	}
 
 	return "", fmt.Errorf("%w: got %s", ErrBadResponse, truncate(raw, 200))

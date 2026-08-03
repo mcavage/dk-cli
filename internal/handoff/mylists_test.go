@@ -216,3 +216,54 @@ func TestMyLists_ValidationErrors(t *testing.T) {
 		}
 	})
 }
+
+// The returned URL goes to a browser, so a third party naming an arbitrary URL
+// must not become "the CLI launches whatever it is told to". This endpoint is
+// unversioned, so a redirect or injection bug there must not escalate locally.
+func TestMyLists_RejectsNonDigiKeyOrNonHTTPSURLs(t *testing.T) {
+	cases := map[string]string{
+		"attacker host":  `"https://evil.example.com/short/abc"`,
+		"plain http":     `"http://www.digikey.com/short/abc"`,
+		"file scheme":    `"file:///etc/passwd"`,
+		"javascript":     `"javascript:alert(1)"`,
+		"host suffix":    `"https://www.digikey.com.evil.example/short/abc"`,
+		"object variant": `{"singleUseUrl":"https://evil.example.com/x"}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				_, _ = w.Write([]byte(body))
+			}))
+			defer srv.Close()
+			_, err := New(Options{BaseURL: srv.URL}).MyLists(
+				context.Background(), "test", "", []Line{dkLine("311-X-ND", 1)})
+			if err == nil {
+				t.Fatalf("must refuse %s", name)
+			}
+			if !errors.Is(err, ErrBadResponse) {
+				t.Fatalf("want ErrBadResponse, got %v", err)
+			}
+		})
+	}
+}
+
+func TestMyLists_AcceptsRealDigiKeyURL(t *testing.T) {
+	for _, body := range []string{
+		`"https://www.digikey.com/short/b3hdmm74"`,
+		`"https://digikey.com/short/b3hdmm74"`,
+		`{"singleUseUrl":"https://www.digikey.com/mylists/singleuse/12345abcde"}`,
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		res, err := New(Options{BaseURL: srv.URL}).MyLists(
+			context.Background(), "test", "", []Line{dkLine("311-X-ND", 1)})
+		srv.Close()
+		if err != nil {
+			t.Fatalf("%s must be accepted, got %v", body, err)
+		}
+		if res.URL == "" {
+			t.Fatalf("%s produced an empty URL", body)
+		}
+	}
+}

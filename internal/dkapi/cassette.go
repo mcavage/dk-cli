@@ -32,7 +32,19 @@ func newCassetteTransport(dir string, next http.RoundTripper) http.RoundTripper 
 	return &cassetteTransport{dir: dir, next: next}
 }
 
+// tokenPathPrefix is never recorded. The token response body contains a live
+// bearer token, and a cassette is a file whose whole purpose is to be committed
+// as a test fixture, so recording it would put a working credential in version
+// control. Header scrubbing cannot help: the token is in the BODY.
+//
+// Excluding it costs nothing. The token flow is not what cassettes are for, and
+// a captured token is useless after ten minutes anyway.
+const tokenPathPrefix = "/v1/oauth2/"
+
 func (t *cassetteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if strings.HasPrefix(req.URL.Path, tokenPathPrefix) {
+		return t.next.RoundTrip(req)
+	}
 	key, err := cassetteKey(req)
 	if err != nil {
 		return nil, err
@@ -84,6 +96,9 @@ func cassetteKey(req *http.Request) (string, error) {
 var (
 	bearerRE = regexp.MustCompile(`(?i)(authorization:\s*bearer\s+)\S+`)
 	clientRE = regexp.MustCompile(`(?i)(x-digikey-client-id:\s*)\S+`)
+	// Header scrubbing alone is not enough: a credential can also arrive in a
+	// JSON body, which is exactly how an OAuth token endpoint returns one.
+	jsonSecretRE = regexp.MustCompile(`(?i)("(?:access_token|client_secret|refresh_token)"\s*:\s*")[^"]*`)
 )
 
 // record writes a replayable response, scrubbed of credentials.
@@ -117,9 +132,20 @@ func (t *cassetteTransport) record(path string, resp *http.Response) error {
 	}
 	out := bearerRE.ReplaceAll(buf.Bytes(), []byte("${1}REDACTED"))
 	out = clientRE.ReplaceAll(out, []byte("${1}REDACTED"))
+	out = jsonSecretRE.ReplaceAll(out, []byte("${1}REDACTED"))
 
+	// Tripwire: a false negative here is a credential committed to a repo, so
+	// refuse to write rather than hope the scrubbers caught everything.
+	for _, marker := range []string{"access_token", "client_secret", "refresh_token"} {
+		if i := bytes.Index(bytes.ToLower(out), []byte(marker)); i >= 0 {
+			tail := out[i:]
+			if !bytes.Contains(tail[:minInt(len(tail), 64)], []byte("REDACTED")) {
+				return fmt.Errorf("refusing to write a cassette containing an unredacted %s", marker)
+			}
+		}
+	}
 	if bytes.Contains(bytes.ToLower(out), []byte("bearer ey")) {
-		return fmt.Errorf("refusing to write a cassette that still contains a token")
+		return fmt.Errorf("refusing to write a cassette that still contains a bearer token")
 	}
 	return os.WriteFile(path, out, 0o600)
 }
@@ -135,4 +161,11 @@ func ScrubbedJSON(b []byte) bool {
 	}
 	var v any
 	return json.Unmarshal(b, &v) == nil || true
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
