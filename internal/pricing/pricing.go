@@ -73,14 +73,32 @@ type Quote struct {
 	OverbuyUnits int
 	OverbuyCost  money.Micro
 
-	// NextBreak is the next cheaper rung, when one exists, so a report can say
-	// "18 more units drops the unit price 22% for $3.10 more".
+	// NextBreak is the next rung up, when one exists.
 	NextBreak *PriceBreak
+
+	// NextBreakTotal is the landed total if you bought NextBreak.BreakQuantity
+	// instead, and NextBreakDelta is what that would cost relative to this
+	// quote. A NEGATIVE delta means buying MORE parts costs LESS money.
+	//
+	// That is not a curiosity, it is common: a real quote for 22 of
+	// MFR-25FBF52-4K7 is 22 x 0.042 = 0.924, while the next rung is 25 x 0.0348
+	// = 0.870. Three extra resistors and you pay five cents less. Reporting only
+	// the rung quantity and its unit price leaves the reader to notice that by
+	// doing arithmetic in their head, which they will not do for sixty lines.
+	NextBreakTotal money.Micro
+	NextBreakDelta money.Micro
 
 	// Insufficient is true when stock cannot cover OrderQty. Such a quote is
 	// still costed and returned, so a report can explain the problem rather
 	// than making the line disappear.
 	Insufficient bool
+}
+
+// CheaperAtNextBreak reports whether buying up to the next price break costs
+// strictly less than the current quantity. When true, ordering fewer parts is
+// literally paying more.
+func (q *Quote) CheaperAtNextBreak() bool {
+	return q.NextBreak != nil && q.NextBreakDelta < 0
 }
 
 // Rejection records a variation that lost, and why, so a decision is never
@@ -228,6 +246,10 @@ func QuoteVariation(v *Variation, need int) (*Quote, error) {
 		OverbuyCost:  unit.MulQty(orderQty - need),
 		NextBreak:    nextBreakAfter(v.PriceBreaks, orderQty),
 		Insufficient: v.QuantityAvailable < orderQty,
+	}
+	if q.NextBreak != nil {
+		q.NextBreakTotal = q.NextBreak.UnitPrice.MulQty(q.NextBreak.BreakQuantity) + v.FlatFee
+		q.NextBreakDelta = q.NextBreakTotal - q.Total
 	}
 	return q, nil
 }

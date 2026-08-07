@@ -44,7 +44,7 @@ func renderHuman(env *output.Envelope, color bool) string {
 	case "part.get":
 		b.WriteString(renderPartDetail(env.Data))
 	case "part.price":
-		b.WriteString(renderKV(env.Data))
+		b.WriteString(renderPartPrice(env.Data))
 	case "bom.format":
 		b.WriteString(renderBOMFormat(env.Data))
 	case "bom.check":
@@ -582,6 +582,52 @@ func wrapIndent(s string, indent, width int) string {
 	}
 	if strings.TrimSpace(line) != "" {
 		b.WriteString(line + "\n")
+	}
+	return b.String()
+}
+
+func renderPartPrice(data any) string {
+	m := asMap(data)
+	q := asMap(m["quote"])
+	if q == nil {
+		return renderKV(data)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s  %s\n", str(m["mpn"]), str(m["manufacturer"]))
+	fmt.Fprintf(&b, "%s  %s\n\n", str(q["dk_pn"]), str(q["packaging"]))
+
+	fmt.Fprintf(&b, "  need         %s\n", intStr(q["need"]))
+	fmt.Fprintf(&b, "  order        %s\n", intStr(q["order_qty"]))
+	fmt.Fprintf(&b, "  unit price   %s\n", str(q["unit_price"]))
+	if fee := str(q["flat_fee"]); fee != "" && fee != "0.00" {
+		fmt.Fprintf(&b, "  fee          %s\n", fee)
+	}
+	fmt.Fprintf(&b, "  TOTAL        %s\n", str(q["total"]))
+
+	if n, _ := q["overbuy_units"].(float64); n > 0 {
+		fmt.Fprintf(&b, "\n  overbuy      %d units, %s (MOQ forced you past what you needed)\n",
+			int(n), str(q["overbuy_cost"]))
+	}
+
+	if nb := asMap(q["next_break"]); nb != nil {
+		cheaper, _ := q["cheaper_at_next_break"].(bool)
+		if cheaper {
+			// The whole reason the delta exists. Without this line a reader has
+			// to multiply two numbers in their head to notice that ordering
+			// fewer parts is costing them money.
+			fmt.Fprintf(&b,
+				"\n  BUY MORE, PAY LESS: %s units at %s is %s, which is %s versus %s.\n",
+				intStr(nb["qty"]), str(nb["unit_price"]), str(nb["total"]),
+				str(nb["delta"]), str(q["total"]))
+		} else {
+			fmt.Fprintf(&b, "\n  next break   %s units at %s = %s (%s)\n",
+				intStr(nb["qty"]), str(nb["unit_price"]), str(nb["total"]), str(nb["delta"]))
+		}
+	}
+
+	if s := str(m["status"]); s != "" {
+		fmt.Fprintf(&b, "\n  status       %s\n", s)
 	}
 	return b.String()
 }

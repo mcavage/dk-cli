@@ -371,3 +371,92 @@ func TestUnitPriceAt_AllBreaksUnusable(t *testing.T) {
 		t.Fatal("a ladder with no positive price must be an error, not free")
 	}
 }
+
+// A real quote from a live account: 22 of MFR-25FBF52-4K7 at 0.042 is 0.924,
+// but the next rung is 25 at 0.0348, which is 0.870. Three more resistors for
+// five cents less. Reporting only the rung and its unit price leaves the reader
+// to spot that by doing arithmetic in their head across sixty lines, which
+// nobody does.
+func TestQuote_NextBreakCanBeCheaperThanBuyingFewer(t *testing.T) {
+	m := func(s string) money.Micro {
+		v, err := money.ParseMicro(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v
+	}
+	v := &Variation{
+		DKPartNumber: "MFR-25FBF52-4K7-ND", Packaging: "Bulk",
+		MinimumOrderQuantity: 1, StandardPackage: 0, QuantityAvailable: 10000,
+		PriceBreaks: []PriceBreak{
+			{BreakQuantity: 1, UnitPrice: m("0.10")},
+			{BreakQuantity: 10, UnitPrice: m("0.042")},
+			{BreakQuantity: 25, UnitPrice: m("0.0348")},
+			{BreakQuantity: 50, UnitPrice: m("0.0298")},
+		},
+	}
+	q, err := QuoteVariation(v, 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := q.Total.String(); got != "0.92" {
+		t.Fatalf("total = %s, want 0.92", got)
+	}
+	if q.NextBreak == nil || q.NextBreak.BreakQuantity != 25 {
+		t.Fatalf("want the next rung at 25, got %+v", q.NextBreak)
+	}
+	if got := q.NextBreakTotal.String(); got != "0.87" {
+		t.Fatalf("next break total = %s, want 0.87", got)
+	}
+	if q.NextBreakDelta >= 0 {
+		t.Fatalf("delta = %s, want negative: buying more must be cheaper here",
+			q.NextBreakDelta.String())
+	}
+	if !q.CheaperAtNextBreak() {
+		t.Fatal("this quote must be flagged as cheaper at the next break")
+	}
+}
+
+// The ordinary case: the next rung costs more, and that must not be reported as
+// a saving.
+func TestQuote_NextBreakUsuallyCostsMore(t *testing.T) {
+	sel, err := Select(realYageo10k(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := sel.Chosen
+	if q.NextBreak == nil {
+		t.Fatal("expected a next break")
+	}
+	if q.NextBreakDelta <= 0 {
+		t.Fatalf("delta = %s, want positive", q.NextBreakDelta.String())
+	}
+	if q.CheaperAtNextBreak() {
+		t.Fatal("a more expensive next break must not be flagged as cheaper")
+	}
+}
+
+// A flat fee applies once regardless of quantity, so it must be in both totals
+// or the delta is wrong by the fee.
+func TestQuote_NextBreakIncludesFlatFee(t *testing.T) {
+	m := func(s string) money.Micro {
+		v, _ := money.ParseMicro(s)
+		return v
+	}
+	v := &Variation{
+		DKPartNumber: "X-DKR-ND", MinimumOrderQuantity: 1, StandardPackage: 1,
+		QuantityAvailable: 1000, FlatFee: m("7.00"),
+		PriceBreaks: []PriceBreak{
+			{BreakQuantity: 1, UnitPrice: m("0.10")},
+			{BreakQuantity: 100, UnitPrice: m("0.01")},
+		},
+	}
+	q, err := QuoteVariation(v, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 100 * 0.01 + 7.00 = 8.00, not 1.00.
+	if got := q.NextBreakTotal.String(); got != "8.00" {
+		t.Fatalf("next break total = %s, want 8.00 including the flat fee", got)
+	}
+}

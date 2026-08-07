@@ -131,24 +131,33 @@ func partGet(rc *runContext, args []string, fv *flagValues) (*output.Envelope, s
 // formatted through money.Micro's own String/Exact rather than the raw
 // int64 micros, per the contract's "never format money yourself" rule.
 type quoteView struct {
-	DKPartNumber string          `json:"dk_pn"`
-	Packaging    string          `json:"packaging"`
-	Need         int             `json:"need"`
-	OrderQty     int             `json:"order_qty"`
-	UnitPrice    string          `json:"unit_price"`
-	Subtotal     string          `json:"subtotal"`
-	FlatFee      string          `json:"flat_fee"`
-	Total        string          `json:"total"`
-	OverbuyUnits int             `json:"overbuy_units"`
-	OverbuyCost  string          `json:"overbuy_cost"`
-	NextBreak    *nextBreakView  `json:"next_break,omitempty"`
-	Insufficient bool            `json:"insufficient"`
-	Rejected     []rejectionView `json:"rejected,omitempty"`
+	DKPartNumber string         `json:"dk_pn"`
+	Packaging    string         `json:"packaging"`
+	Need         int            `json:"need"`
+	OrderQty     int            `json:"order_qty"`
+	UnitPrice    string         `json:"unit_price"`
+	Subtotal     string         `json:"subtotal"`
+	FlatFee      string         `json:"flat_fee"`
+	Total        string         `json:"total"`
+	OverbuyUnits int            `json:"overbuy_units"`
+	OverbuyCost  string         `json:"overbuy_cost"`
+	NextBreak    *nextBreakView `json:"next_break,omitempty"`
+	// CheaperAtNextBreak is true when ordering MORE parts costs LESS money.
+	// It is a separate boolean rather than something a caller derives from the
+	// delta's sign, because an agent scanning fields will not do sign analysis.
+	CheaperAtNextBreak bool            `json:"cheaper_at_next_break"`
+	Insufficient       bool            `json:"insufficient"`
+	Rejected           []rejectionView `json:"rejected,omitempty"`
 }
 
 type nextBreakView struct {
 	Qty       int    `json:"qty"`
 	UnitPrice string `json:"unit_price"`
+	// Total is the landed total at that quantity, fees included. Delta is what
+	// it costs relative to the current quote, and it is signed: a negative
+	// delta means buying more parts costs less money.
+	Total string `json:"total"`
+	Delta string `json:"delta"`
 }
 
 type rejectionView struct {
@@ -172,7 +181,13 @@ func toQuoteView(q *pricing.Quote, rejected []pricing.Rejection) quoteView {
 		Insufficient: q.Insufficient,
 	}
 	if q.NextBreak != nil {
-		qv.NextBreak = &nextBreakView{Qty: q.NextBreak.BreakQuantity, UnitPrice: q.NextBreak.UnitPrice.Exact()}
+		qv.NextBreak = &nextBreakView{
+			Qty:       q.NextBreak.BreakQuantity,
+			UnitPrice: q.NextBreak.UnitPrice.Exact(),
+			Total:     q.NextBreakTotal.String(),
+			Delta:     q.NextBreakDelta.String(),
+		}
+		qv.CheaperAtNextBreak = q.CheaperAtNextBreak()
 	}
 	for _, r := range rejected {
 		rv := rejectionView{Reason: r.Reason}
