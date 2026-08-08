@@ -1,7 +1,20 @@
 name: release
+
+# Auto-publish on version bump: bump VERSION, merge to main, and the tag,
+# build, release and formula update all happen without a manual tag push.
+#
+# The guard is that the tag must not already exist. That makes the whole job
+# idempotent, so an unrelated push to main is a no-op rather than a failed or
+# duplicate release.
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+    paths: ['VERSION']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release, without the v (e.g. 0.1.1)'
+        required: false
 
 permissions:
   contents: write
@@ -12,32 +25,74 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # `git describe` needs tags for the version stamp
+          fetch-depth: 0   # git describe and tag checks need history
+
+      - name: resolve version
+        id: v
+        run: |
+          version="${{ github.event.inputs.version }}"
+          [ -n "$version" ] || version="$(tr -d ' \n' < VERSION)"
+          case "$version" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "VERSION must be semver, got '$version'" >&2; exit 1 ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version"    >> "$GITHUB_OUTPUT"
+          if git rev-parse "v$version" >/dev/null 2>&1; then
+            echo "tag v$version already exists, nothing to release"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/setup-go@v5
+        if: steps.v.outputs.exists == 'false'
         with:
           go-version: '1.26'
 
-      # Never publish a build that would not pass CI. A tag is the one moment
-      # where skipping the gate is most tempting and most expensive.
-      - run: make check
-      - run: make dist
+      # Never publish a build that would not pass CI. A release is the one
+      # moment where skipping the gate is most tempting and most expensive.
+      - name: gate
+        if: steps.v.outputs.exists == 'false'
+        run: make check
+
+      - name: build
+        if: steps.v.outputs.exists == 'false'
+        run: make dist VERSION=${{ steps.v.outputs.tag }}
+
+      - name: tag
+        if: steps.v.outputs.exists == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ steps.v.outputs.tag }}" -m "${{ steps.v.outputs.tag }}"
+          git push origin "${{ steps.v.outputs.tag }}"
 
       - name: publish
+        if: steps.v.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "${GITHUB_REF_NAME}" \
+          gh release create "${{ steps.v.outputs.tag }}" \
+            --title "${{ steps.v.outputs.tag }}" \
             --generate-notes \
             dist/dk_* dist/checksums.txt
 
-      # The Homebrew formula points at release assets by URL and SHA256, so it
-      # can only be written after the assets exist. Requires a HOMEBREW_TAP_TOKEN
-      # secret with write access to the tap repo; skipped when absent so a
-      # release never fails because the tap is not set up yet.
+      # Cross-repo push needs a PAT: the built-in GITHUB_TOKEN is scoped to this
+      # repository only. Without the secret this step is skipped rather than
+      # failing the release, so a missing tap never blocks shipping the binaries.
       - name: update homebrew tap
-        if: ${{ env.TAP_TOKEN != '' }}
+        if: steps.v.outputs.exists == 'false' && secrets.HOMEBREW_TAP_TOKEN != ''
         env:
           TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           TAP_REPO: mcavage/homebrew-tap
-        run: ./scripts/update-tap.sh "${GITHUB_REF_NAME}"
+          REPO: ${{ github.repository }}
+        run: ./scripts/update-tap.sh "${{ steps.v.outputs.tag }}"
+
+      - name: tap not updated
+        if: steps.v.outputs.exists == 'false' && secrets.HOMEBREW_TAP_TOKEN == ''
+        run: |
+          echo "::notice::Binaries published, Homebrew formula NOT updated."
+          echo "::notice::Add a HOMEBREW_TAP_TOKEN secret (a PAT with repo scope on"
+          echo "::notice::mcavage/homebrew-tap) to automate it, or run:"
+          echo "::notice::  make dist && TAP_TOKEN=\$TOKEN ./scripts/update-tap.sh ${{ steps.v.outputs.tag }}"

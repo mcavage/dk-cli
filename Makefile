@@ -6,7 +6,9 @@
 
 BIN     := dk
 MODULE  := github.com/mcavage/dk-cli
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# VERSION is the release source of truth: bump it, merge, and CI publishes.
+# git describe is only a fallback for local builds off an untagged tree.
+VERSION ?= v$(shell tr -d ' \n' < VERSION 2>/dev/null || echo 0.0.0)-$(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 DIST    := dist
 
 PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64
@@ -15,7 +17,7 @@ PLATFORMS := darwin/arm64 darwin/amd64 linux/amd64 linux/arm64
 # attaches a debugger to, and it cuts the download roughly in half.
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build test check fmtcheck ignorecheck dist clean install checksums
+.PHONY: build test check fmtcheck ignorecheck dist clean install checksums release-version
 
 build:
 	go build -ldflags '$(LDFLAGS)' -o $(BIN) ./cmd/dk
@@ -48,14 +50,29 @@ ignorecheck:
 	  echo "these .go files are gitignored and would not be committed:"; \
 	  echo "$$out"; exit 1; fi
 
+# BARE_VERSION is the version without the leading v, which is what Homebrew
+# wants and what the asset names carry.
+BARE_VERSION := $(patsubst v%,%,$(VERSION))
+
+# Files that travel with every binary. STAGED is the single list the formula
+# test checks itself against, so `def install` cannot reference something the
+# tarball does not carry.
+STAGED := $(BIN) LICENSE README.md AGENTS.md
+
 dist: clean
 	@mkdir -p $(DIST)
 	@for p in $(PLATFORMS); do \
 	  os=$${p%/*}; arch=$${p#*/}; \
-	  echo "building $(BIN)_$${os}_$${arch}"; \
+	  name=$(BIN)_$(BARE_VERSION)_$${os}_$${arch}; \
+	  echo "building $$name"; \
+	  stage=$(DIST)/stage_$${os}_$${arch}; \
+	  mkdir -p $$stage; \
 	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch \
 	    go build -trimpath -ldflags '$(LDFLAGS)' \
-	    -o $(DIST)/$(BIN)_$${os}_$${arch} ./cmd/dk || exit 1; \
+	    -o $$stage/$(BIN) ./cmd/dk || exit 1; \
+	  cp LICENSE README.md AGENTS.md $$stage/ || exit 1; \
+	  tar -czf $(DIST)/$$name.tar.gz -C $$stage $(STAGED) || exit 1; \
+	  rm -rf $$stage; \
 	done
 	@$(MAKE) --no-print-directory checksums
 
@@ -63,10 +80,15 @@ dist: clean
 # formula can both read the same file.
 checksums:
 	@cd $(DIST) && \
-	  if command -v sha256sum >/dev/null 2>&1; then sha256sum $(BIN)_* > checksums.txt; \
-	  else shasum -a 256 $(BIN)_* > checksums.txt; fi && \
+	  if command -v sha256sum >/dev/null 2>&1; then sha256sum $(BIN)_*.tar.gz > checksums.txt; \
+	  else shasum -a 256 $(BIN)_*.tar.gz > checksums.txt; fi && \
 	  sed -i.bak 's| \*| |' checksums.txt && rm -f checksums.txt.bak && \
 	  cat checksums.txt
 
 clean:
 	rm -rf $(DIST) $(BIN)
+
+# What the next push of VERSION would publish.
+release-version:
+	@echo "VERSION file: $$(tr -d ' \n' < VERSION)"
+	@echo "build stamp:  $(VERSION)"

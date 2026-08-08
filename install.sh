@@ -34,18 +34,25 @@ case "$(uname -m)" in
   *) err "unsupported architecture: $(uname -m)" ;;
 esac
 
+# Resolve the version so the asset name can carry it, matching what the
+# Homebrew formula and the release job both expect.
 if [ "$VERSION" = "latest" ]; then
-  BASE="https://github.com/$REPO/releases/latest/download"
+  RESOLVED="$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+    "https://github.com/$REPO/releases/latest" 2>/dev/null | sed 's|.*/tag/||')"
+  [ -n "$RESOLVED" ] || err "could not resolve the latest release. Build from source:
+  go install github.com/$REPO/cmd/$BIN@latest"
 else
-  BASE="https://github.com/$REPO/releases/download/$VERSION"
+  RESOLVED="$VERSION"
 fi
+BARE="${RESOLVED#v}"
+BASE="https://github.com/$REPO/releases/download/$RESOLVED"
 
-ASSET="${BIN}_${OS}_${ARCH}"
+ASSET="${BIN}_${BARE}_${OS}_${ARCH}.tar.gz"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
 info "downloading $ASSET"
-curl -fsSL "$BASE/$ASSET" -o "$TMP/$BIN" \
+curl -fsSL "$BASE/$ASSET" -o "$TMP/$ASSET" \
   || err "download failed. If no release exists yet, build from source:
   go install github.com/$REPO/cmd/$BIN@latest"
 
@@ -55,9 +62,9 @@ curl -fsSL "$BASE/checksums.txt" -o "$TMP/checksums.txt" \
   || err "could not fetch checksums.txt; refusing to install unverified"
 
 if command -v sha256sum >/dev/null 2>&1; then
-  ACTUAL="$(sha256sum "$TMP/$BIN" | awk '{print $1}')"
+  ACTUAL="$(sha256sum "$TMP/$ASSET" | awk '{print $1}')"
 elif command -v shasum >/dev/null 2>&1; then
-  ACTUAL="$(shasum -a 256 "$TMP/$BIN" | awk '{print $1}')"
+  ACTUAL="$(shasum -a 256 "$TMP/$ASSET" | awk '{print $1}')"
 else
   err "no sha256sum or shasum found; refusing to install unverified"
 fi
@@ -68,9 +75,22 @@ EXPECTED="$(awk -v a="$ASSET" '$2 == a || $2 == "*"a {print $1}' "$TMP/checksums
   expected $EXPECTED
   actual   $ACTUAL"
 
+tar -xzf "$TMP/$ASSET" -C "$TMP" || err "could not unpack $ASSET"
+[ -f "$TMP/$BIN" ] || err "$ASSET did not contain a $BIN binary"
+
 mkdir -p "$INSTALL_DIR"
 chmod +x "$TMP/$BIN"
 mv "$TMP/$BIN" "$INSTALL_DIR/$BIN"
+
+# The tarball also carries LICENSE, README.md and AGENTS.md. Homebrew installs
+# them into doc; put them somewhere findable here too rather than making this
+# the one channel that drops them.
+DOC_DIR="${DK_DOC_DIR:-$HOME/.local/share/doc/$BIN}"
+if mkdir -p "$DOC_DIR" 2>/dev/null; then
+  for f in LICENSE README.md AGENTS.md; do
+    [ -f "$TMP/$f" ] && cp "$TMP/$f" "$DOC_DIR/" 2>/dev/null || true
+  done
+fi
 
 info "installed $INSTALL_DIR/$BIN"
 
