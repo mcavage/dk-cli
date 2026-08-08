@@ -22,6 +22,11 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # The secrets context is not available in step-level `if:` conditions, so
+    # the token is mapped to job-level env and the steps branch on that. Getting
+    # this wrong fails the whole workflow file to parse, not just the step.
+    env:
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -82,15 +87,14 @@ jobs:
       # repository only. Without the secret this step is skipped rather than
       # failing the release, so a missing tap never blocks shipping the binaries.
       - name: update homebrew tap
-        if: steps.v.outputs.exists == 'false' && secrets.HOMEBREW_TAP_TOKEN != ''
+        if: steps.v.outputs.exists == 'false' && env.TAP_TOKEN != ''
         env:
-          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           TAP_REPO: mcavage/homebrew-tap
           REPO: ${{ github.repository }}
         run: ./scripts/update-tap.sh "${{ steps.v.outputs.tag }}"
 
       - name: tap not updated
-        if: steps.v.outputs.exists == 'false' && secrets.HOMEBREW_TAP_TOKEN == ''
+        if: steps.v.outputs.exists == 'false' && env.TAP_TOKEN == ''
         run: |
           echo "::notice::Binaries published, Homebrew formula NOT updated."
           echo "::notice::Add a HOMEBREW_TAP_TOKEN secret (a PAT with repo scope on"
