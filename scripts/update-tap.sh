@@ -70,8 +70,29 @@ if git diff --quiet; then
   echo "tap formula already current for ${TAG}"
   exit 0
 fi
+
 git config user.name "dk release"
 git config user.email "noreply@github.com"
 git add Formula/dk.rb
 git commit -m "dk ${TAG}"
-git push
+
+# A PR, not a push to main. The tap protects main behind required status
+# checks, so a direct push is rejected outright, and it should be: the tap's
+# CI is what proves a formula actually installs on a real macOS runner before
+# users get it. Bypassing that would make the checks decorative.
+BRANCH="dk-${TAG}"
+git branch -m "$BRANCH"
+git push -u origin "$BRANCH" --force
+
+if command -v gh >/dev/null 2>&1; then
+  GH_TOKEN="$TAP_TOKEN" gh pr create --repo "$TAP_REPO" \
+    --head "$BRANCH" --base main \
+    --title "dk ${TAG}" \
+    --body "Automated formula bump for [dk ${TAG}](https://github.com/${REPO}/releases/tag/${TAG}).
+
+Checksums come from the published release assets. Source of truth is
+\`Formula/dk.rb\` in ${REPO}; edits made directly here are overwritten by the
+next release." 2>&1 || echo "branch pushed; open a PR manually"
+else
+  echo "branch $BRANCH pushed; open a PR against $TAP_REPO to merge it"
+fi
