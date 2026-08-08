@@ -3,6 +3,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -143,4 +144,36 @@ func mustFind(t *testing.T, cmds []command, name string) command {
 	}
 	t.Fatalf("command %q not found", name)
 	return command{}
+}
+
+// -X does not error on an unknown symbol, so a misnamed or missing variable
+// makes the version stamp silently vanish. v0.1.0 shipped reporting a Go
+// pseudo-version because main.version did not exist at all, which would fail
+// the Homebrew formula's own version assertion.
+func TestVersionStringPrefersTheInjectedTag(t *testing.T) {
+	orig := version
+	t.Cleanup(func() { version = orig })
+
+	version = "v9.9.9"
+	if got := versionString(); got != "v9.9.9" {
+		t.Fatalf("versionString() = %q, want the injected tag", got)
+	}
+
+	// Without an injection it must still say something, never empty.
+	version = ""
+	if got := versionString(); got == "" {
+		t.Fatal("versionString() must never be empty")
+	}
+}
+
+// The release ldflags must reference the symbol that actually exists. This
+// catches a rename of the variable without a matching Makefile change.
+func TestMakefileInjectsTheRealSymbol(t *testing.T) {
+	b, err := os.ReadFile("../../Makefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "-X main.version=") {
+		t.Fatal("the Makefile must inject main.version, which is the var versionString reads")
+	}
 }

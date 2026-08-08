@@ -150,7 +150,22 @@ func helpEnvelope(cmds []command, cmd *command) *output.Envelope {
 // versionString reports the module version pi built this binary from, or
 // "dev" outside a proper build (e.g. `go run`), which is honest rather than
 // inventing a number nothing produced.
+// version is injected at build time with -X main.version, which is how a
+// release build gets a real tag instead of a pseudo-version.
+//
+// It must be a package-level var in package main with exactly this name, or the
+// linker flag silently does nothing: -X does not error on an unknown symbol. A
+// released binary reporting v0.0.0-20260808164117-b3008a4bff5a instead of
+// v0.1.0 is what that silence looks like, and it fails the Homebrew formula's
+// own version assertion.
+var version string
+
+// versionString prefers the injected tag, falls back to Go's build info for
+// `go install` builds, and only then admits it does not know.
 func versionString() string {
+	if version != "" {
+		return version
+	}
 	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
 		return info.Main.Version
 	}
