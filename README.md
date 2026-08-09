@@ -61,7 +61,7 @@ verify, and needs no root.
 
 Releases are automatic: bump `VERSION`, merge to main, and CI gates on the full
 test suite, tags, builds four platforms, publishes with checksums, and updates
-the Homebrew formula. `Formula/dk.rb` in this repo is the source of truth for
+the Homebrew formula. `packaging/homebrew/dk.rb` in this repo is the source of truth for
 the tap; a test asserts it only installs files the release tarball actually
 carries.
 

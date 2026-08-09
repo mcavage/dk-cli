@@ -1,5 +1,7 @@
 # THIS FILE IS THE SOURCE OF TRUTH for mcavage/homebrew-tap's Formula/dk.rb.
 #
+# Lives at packaging/homebrew/dk.rb to match the sibling pix repo's layout.
+#
 # The `update homebrew tap` step in .github/workflows/release.yml copies this
 # file over the tap's copy on every release and then rewrites exactly three
 # things: `version`, all four `url`s, and all four `sha256`s. Everything else,

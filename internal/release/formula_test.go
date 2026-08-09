@@ -19,7 +19,7 @@ import (
 // So: the formula lives here, next to the Makefile that stages the tarball, and
 // this test asserts it only installs paths that are actually staged.
 func TestFormulaOnlyInstallsStagedFiles(t *testing.T) {
-	formula := readFile(t, "../../Formula/dk.rb")
+	formula := readFile(t, "../../packaging/homebrew/dk.rb")
 	staged := stagedFiles(t)
 
 	// Everything quoted inside the install block.
@@ -34,7 +34,7 @@ func TestFormulaOnlyInstallsStagedFiles(t *testing.T) {
 
 // Every staged file should be installed, or it is dead weight in the download.
 func TestEveryStagedFileIsInstalled(t *testing.T) {
-	formula := readFile(t, "../../Formula/dk.rb")
+	formula := readFile(t, "../../packaging/homebrew/dk.rb")
 	install := installBlock(t, formula)
 	installed := map[string]bool{}
 	for _, f := range quoted(install) {
@@ -50,7 +50,7 @@ func TestEveryStagedFileIsInstalled(t *testing.T) {
 // Homebrew parses the "arm64" suffix as version 64 without an explicit version
 // stanza, and installs into Cellar/dk/64.
 func TestFormulaPinsAnExplicitVersion(t *testing.T) {
-	formula := readFile(t, "../../Formula/dk.rb")
+	formula := readFile(t, "../../packaging/homebrew/dk.rb")
 	if !regexp.MustCompile(`(?m)^  version "`).MatchString(formula) {
 		t.Fatal("Formula/dk.rb must pin an explicit version")
 	}
@@ -59,7 +59,7 @@ func TestFormulaPinsAnExplicitVersion(t *testing.T) {
 // The release job rewrites version, urls and sha256s. If the URL template ever
 // stops matching the asset names `make dist` produces, every install 404s.
 func TestFormulaURLsMatchAssetNaming(t *testing.T) {
-	formula := readFile(t, "../../Formula/dk.rb")
+	formula := readFile(t, "../../packaging/homebrew/dk.rb")
 	for _, platform := range []string{
 		"darwin_arm64", "darwin_amd64", "linux_arm64", "linux_amd64",
 	} {
@@ -138,7 +138,7 @@ func TestFormulaIsSyntacticallyValidRuby(t *testing.T) {
 	if err != nil {
 		t.Skip("ruby not installed")
 	}
-	cmd := exec.Command(ruby, "-c", "../../Formula/dk.rb")
+	cmd := exec.Command(ruby, "-c", "../../packaging/homebrew/dk.rb")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("Formula/dk.rb is not valid ruby: %v\n%s", err, out)
 	}

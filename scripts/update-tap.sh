@@ -13,7 +13,7 @@ TAG="${1:?usage: update-tap.sh vX.Y.Z}"
 VERSION="${TAG#v}"
 REPO="${REPO:-mcavage/dk-cli}"
 TAP_REPO="${TAP_REPO:-mcavage/homebrew-tap}"
-SRC="Formula/dk.rb"
+SRC="packaging/homebrew/dk.rb"
 
 [ -f "$SRC" ] || { echo "missing $SRC" >&2; exit 1; }
 [ -f dist/checksums.txt ] || { echo "missing dist/checksums.txt; run make dist first" >&2; exit 1; }
@@ -61,11 +61,19 @@ if [ -z "${TAP_TOKEN:-}" ]; then
   exit 0
 fi
 
-git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPO}.git" "$WORK/tap"
-mkdir -p "$WORK/tap/Formula"
-cp "$WORK/dk.rb" "$WORK/tap/Formula/dk.rb"
+# TAP_DIR lets CI hand over a checkout made by actions/checkout with a token,
+# which keeps the credential out of a git remote URL (where it would persist in
+# the runner's .git/config). Locally, fall back to cloning.
+if [ -n "${TAP_DIR:-}" ]; then
+  TAP_PATH="$TAP_DIR"
+else
+  git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/${TAP_REPO}.git" "$WORK/tap"
+  TAP_PATH="$WORK/tap"
+fi
+mkdir -p "$TAP_PATH/Formula"
+cp "$WORK/dk.rb" "$TAP_PATH/Formula/dk.rb"
 
-cd "$WORK/tap"
+cd "$TAP_PATH"
 if git diff --quiet; then
   echo "tap formula already current for ${TAG}"
   exit 0
